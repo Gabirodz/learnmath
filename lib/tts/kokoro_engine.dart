@@ -224,7 +224,7 @@ class KokoroTtsEngine implements TtsEngine {
           numThreads: args[5] as int,
         ),
         // We insert our own pauses between segments.
-        maxNumSentences: 2,
+        maxNumSenetences: 2, // (sic) upstream spelling in 1.13
       ));
     } catch (e) {
       out.send('$e');
