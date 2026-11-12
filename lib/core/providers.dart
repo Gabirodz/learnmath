@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:sembast/sembast.dart';
 
 import '../pipeline/generation_service.dart';
 import '../player/lecture_player.dart';
@@ -10,12 +11,14 @@ import 'storage.dart';
 class AppServices {
   const AppServices({
     required this.paths,
+    required this.db,
     required this.repo,
     required this.settingsStore,
     required this.initialSettings,
   });
 
   final AppPaths paths;
+  final Database db;
   final LibraryRepository repo;
   final SettingsStore settingsStore;
   final AppSettings initialSettings;
@@ -26,6 +29,9 @@ final appServicesProvider = Provider<AppServices>(
 
 final repositoryProvider =
     Provider<LibraryRepository>((ref) => ref.watch(appServicesProvider).repo);
+
+final databaseProvider =
+    Provider<Database>((ref) => ref.watch(appServicesProvider).db);
 
 final appPathsProvider =
     Provider<AppPaths>((ref) => ref.watch(appServicesProvider).paths);

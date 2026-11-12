@@ -21,6 +21,7 @@ Future<void> main() async {
   final settingsStore = SettingsStore(db);
   final services = AppServices(
     paths: paths,
+    db: db,
     repo: LibraryRepository(db, paths),
     settingsStore: settingsStore,
     initialSettings: await settingsStore.load(),

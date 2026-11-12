@@ -26,6 +26,8 @@ class AppPaths {
 
   String get dbPath => p.join(docs, 'learnmath.db');
   String get modelsDir => p.join(support, 'models');
+  String bookDir(String courseId) => p.join(docs, 'books', courseId);
+  String bookPdf(String courseId) => p.join(bookDir(courseId), 'book.pdf');
   String lessonDir(String lessonId) => p.join(docs, 'lessons', lessonId);
   String lessonAudio(String lessonId) =>
       p.join(lessonDir(lessonId), 'lecture.wav');
@@ -43,6 +45,9 @@ class LibraryRepository {
   final AppPaths _paths;
   final _courses = stringMapStoreFactory.store('courses');
   final _lessons = stringMapStoreFactory.store('lessons');
+
+  /// Chat threads, keyed by lesson id (see `lib/chat`).
+  final _chats = stringMapStoreFactory.store('chats');
 
   Stream<List<Course>> watchCourses() => _courses
       .query(finder: Finder(sortOrders: [SortOrder('createdAt', false)]))
@@ -122,6 +127,7 @@ class LibraryRepository {
 
   Future<void> deleteLesson(String id) async {
     await _lessons.record(id).delete(_db);
+    await _chats.record(id).delete(_db);
     await _deleteDir(_paths.lessonDir(id));
   }
 
@@ -131,10 +137,12 @@ class LibraryRepository {
       await _courses.record(id).delete(txn);
       await _lessons.delete(txn,
           finder: Finder(filter: Filter.equals('courseId', id)));
+      await _chats.records([for (final l in lessons) l.id]).delete(txn);
     });
     for (final l in lessons) {
       await _deleteDir(_paths.lessonDir(l.id));
     }
+    await _deleteDir(_paths.bookDir(id));
   }
 
   Future<void> _deleteDir(String path) async {
@@ -151,20 +159,25 @@ class SettingsStore {
   final _record = StoreRef<String, Map<String, Object?>>('app').record('settings');
   static const _secure = FlutterSecureStorage();
   static const _apiKeyName = 'openrouter_api_key';
+  static const _mathpixKeyName = 'mathpix_app_key';
 
   Future<AppSettings> load() async {
     final json = await _record.get(_db) ?? const <String, Object?>{};
     String apiKey = '';
+    String mathpixKey = '';
     try {
       apiKey = await _secure.read(key: _apiKeyName) ?? '';
+      mathpixKey = await _secure.read(key: _mathpixKeyName) ?? '';
     } catch (_) {
       // Keystore can become unreadable (e.g. after a restore); treat as unset.
     }
-    return AppSettings.fromJson(json, apiKey: apiKey);
+    return AppSettings.fromJson(json,
+        apiKey: apiKey, mathpixAppKey: mathpixKey);
   }
 
   Future<void> save(AppSettings s) async {
     await _record.put(_db, s.toJson());
     await _secure.write(key: _apiKeyName, value: s.apiKey.trim());
+    await _secure.write(key: _mathpixKeyName, value: s.mathpixAppKey.trim());
   }
 }

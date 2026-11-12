@@ -16,15 +16,34 @@ class OpenRouterException implements Exception {
 }
 
 class ChatMessage {
-  const ChatMessage._(this.role, this.content);
+  const ChatMessage._(this.role, this.content, [this.images = const []]);
   const ChatMessage.system(String content) : this._('system', content);
   const ChatMessage.user(String content) : this._('user', content);
   const ChatMessage.assistant(String content) : this._('assistant', content);
 
+  /// A user message with PNG images attached (for vision models).
+  const ChatMessage.userWithImages(String content, List<Uint8List> pngImages)
+      : this._('user', content, pngImages);
+
   final String role;
   final String content;
+  final List<Uint8List> images;
 
-  Map<String, String> toJson() => {'role': role, 'content': content};
+  Map<String, Object> toJson() => {
+        'role': role,
+        'content': images.isEmpty
+            ? content
+            : [
+                {'type': 'text', 'text': content},
+                for (final png in images)
+                  {
+                    'type': 'image_url',
+                    'image_url': {
+                      'url': 'data:image/png;base64,${base64Encode(png)}',
+                    },
+                  },
+              ],
+      };
 }
 
 class OpenRouterClient {
@@ -58,13 +77,15 @@ class OpenRouterClient {
       };
 
   /// Streams the completion and returns the full text. [onProgress] receives
-  /// the accumulated character count as text arrives.
+  /// the accumulated character count as text arrives, [onDelta] each new
+  /// piece of text.
   Future<String> chat({
     required String model,
     required List<ChatMessage> messages,
     double? temperature,
     int? maxTokens,
     void Function(int totalChars)? onProgress,
+    void Function(String delta)? onDelta,
   }) async {
     final req = http.Request('POST', Uri.parse('$_baseUrl/chat/completions'))
       ..headers.addAll(_headers)
@@ -129,6 +150,7 @@ class OpenRouterClient {
           buf.write(content);
           total += content.length;
           onProgress?.call(total);
+          onDelta?.call(content);
         }
         final finish = choice['finish_reason'];
         if (finish == 'error') {

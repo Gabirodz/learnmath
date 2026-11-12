@@ -5,6 +5,9 @@ library;
 enum LessonStage {
   /// Created (e.g. as part of a course outline) but nothing generated yet.
   pending,
+
+  /// Reading a chapter of an imported book into Markdown + LaTeX.
+  transcribing,
   generatingNotes,
   generatingNarration,
   synthesizingAudio,
@@ -12,6 +15,7 @@ enum LessonStage {
   failed;
 
   bool get isWorking =>
+      this == transcribing ||
       this == generatingNotes ||
       this == generatingNarration ||
       this == synthesizingAudio;
@@ -93,6 +97,9 @@ class Lesson {
     this.lastPositionMs = 0,
     this.completed = false,
     this.error,
+    this.sourceStartPage,
+    this.sourceEndPage,
+    this.sourceStopBefore,
   });
 
   final String id;
@@ -127,6 +134,16 @@ class Lesson {
   /// Human-readable failure reason when [stage] is [LessonStage.failed].
   final String? error;
 
+  /// For a chapter of an imported book: its page range in the book PDF
+  /// (1-based, inclusive). The notes are then a transcription of those pages.
+  final int? sourceStartPage;
+  final int? sourceEndPage;
+
+  /// Title of the next chapter/section, which may begin on [sourceEndPage];
+  /// transcription stops before it.
+  final String? sourceStopBefore;
+
+  bool get isBookChapter => sourceStartPage != null;
   bool get hasNotes => notesMarkdown != null && notesMarkdown!.isNotEmpty;
   bool get hasAudio => audioPath != null && segments.isNotEmpty;
 
@@ -164,6 +181,9 @@ class Lesson {
         lastPositionMs: lastPositionMs ?? this.lastPositionMs,
         completed: completed ?? this.completed,
         error: clearError ? null : (error ?? this.error),
+        sourceStartPage: sourceStartPage,
+        sourceEndPage: sourceEndPage,
+        sourceStopBefore: sourceStopBefore,
       );
 
   Map<String, Object?> toJson() => {
@@ -182,6 +202,9 @@ class Lesson {
         'lastPositionMs': lastPositionMs,
         'completed': completed,
         'error': error,
+        'sourceStartPage': sourceStartPage,
+        'sourceEndPage': sourceEndPage,
+        'sourceStopBefore': sourceStopBefore,
       };
 
   factory Lesson.fromJson(Map<String, Object?> j) => Lesson(
@@ -204,6 +227,9 @@ class Lesson {
         lastPositionMs: (j['lastPositionMs'] as num?)?.toInt() ?? 0,
         completed: j['completed'] as bool? ?? false,
         error: j['error'] as String?,
+        sourceStartPage: (j['sourceStartPage'] as num?)?.toInt(),
+        sourceEndPage: (j['sourceEndPage'] as num?)?.toInt(),
+        sourceStopBefore: j['sourceStopBefore'] as String?,
       );
 }
 
@@ -213,6 +239,8 @@ class Course {
     required this.title,
     required this.description,
     required this.createdAt,
+    this.bookPath,
+    this.bookPageCount,
   });
 
   final String id;
@@ -220,11 +248,19 @@ class Course {
   final String description;
   final DateTime createdAt;
 
+  /// For an imported book: absolute path of the app's copy of the PDF.
+  final String? bookPath;
+  final int? bookPageCount;
+
+  bool get isBook => bookPath != null;
+
   Map<String, Object?> toJson() => {
         'id': id,
         'title': title,
         'description': description,
         'createdAt': createdAt.millisecondsSinceEpoch,
+        'bookPath': bookPath,
+        'bookPageCount': bookPageCount,
       };
 
   factory Course.fromJson(Map<String, Object?> j) => Course(
@@ -233,6 +269,8 @@ class Course {
         description: j['description'] as String? ?? '',
         createdAt: DateTime.fromMillisecondsSinceEpoch(
             (j['createdAt'] as num).toInt()),
+        bookPath: j['bookPath'] as String?,
+        bookPageCount: (j['bookPageCount'] as num?)?.toInt(),
       );
 }
 
@@ -279,6 +317,9 @@ class CourseContext {
 
 enum TtsBackend { kokoro, openRouter }
 
+/// How pages of an imported book are turned into Markdown + LaTeX.
+enum TranscriptionBackend { openRouterVision, mathpix }
+
 class AppSettings {
   const AppSettings({
     this.apiKey = '',
@@ -290,9 +331,14 @@ class AppSettings {
     this.pauseScale = 1.0,
     this.playbackSpeed = 1.0,
     this.skipSeconds = 10,
+    this.transcriptionBackend = TranscriptionBackend.openRouterVision,
+    this.visionModel = defaultVisionModel,
+    this.mathpixAppId = '',
+    this.mathpixAppKey = '',
   });
 
   static const defaultChatModel = 'openai/gpt-6-luna';
+  static const defaultVisionModel = 'openai/gpt-6-luna';
 
   /// OpenRouter API key (kept in secure storage, not in the database).
   final String apiKey;
@@ -311,7 +357,18 @@ class AppSettings {
   /// Double-tap seek distance.
   final int skipSeconds;
 
+  final TranscriptionBackend transcriptionBackend;
+
+  /// OpenRouter model (image input) used to read book pages.
+  final String visionModel;
+  final String mathpixAppId;
+
+  /// Kept in secure storage, like [apiKey].
+  final String mathpixAppKey;
+
   bool get hasApiKey => apiKey.trim().isNotEmpty;
+  bool get hasMathpix =>
+      mathpixAppId.trim().isNotEmpty && mathpixAppKey.trim().isNotEmpty;
 
   AppSettings copyWith({
     String? apiKey,
@@ -323,6 +380,10 @@ class AppSettings {
     double? pauseScale,
     double? playbackSpeed,
     int? skipSeconds,
+    TranscriptionBackend? transcriptionBackend,
+    String? visionModel,
+    String? mathpixAppId,
+    String? mathpixAppKey,
   }) =>
       AppSettings(
         apiKey: apiKey ?? this.apiKey,
@@ -334,9 +395,13 @@ class AppSettings {
         pauseScale: pauseScale ?? this.pauseScale,
         playbackSpeed: playbackSpeed ?? this.playbackSpeed,
         skipSeconds: skipSeconds ?? this.skipSeconds,
+        transcriptionBackend: transcriptionBackend ?? this.transcriptionBackend,
+        visionModel: visionModel ?? this.visionModel,
+        mathpixAppId: mathpixAppId ?? this.mathpixAppId,
+        mathpixAppKey: mathpixAppKey ?? this.mathpixAppKey,
       );
 
-  /// Everything except the API key.
+  /// Everything except the secrets.
   Map<String, Object?> toJson() => {
         'chatModel': chatModel,
         'ttsBackend': ttsBackend.name,
@@ -346,12 +411,25 @@ class AppSettings {
         'pauseScale': pauseScale,
         'playbackSpeed': playbackSpeed,
         'skipSeconds': skipSeconds,
+        'transcriptionBackend': transcriptionBackend.name,
+        'visionModel': visionModel,
+        'mathpixAppId': mathpixAppId,
       };
 
-  factory AppSettings.fromJson(Map<String, Object?> j, {String apiKey = ''}) {
+  factory AppSettings.fromJson(
+    Map<String, Object?> j, {
+    String apiKey = '',
+    String mathpixAppKey = '',
+  }) {
     const d = AppSettings();
     return AppSettings(
       apiKey: apiKey,
+      mathpixAppKey: mathpixAppKey,
+      transcriptionBackend: TranscriptionBackend.values
+              .asNameMap()[j['transcriptionBackend']] ??
+          d.transcriptionBackend,
+      visionModel: j['visionModel'] as String? ?? d.visionModel,
+      mathpixAppId: j['mathpixAppId'] as String? ?? d.mathpixAppId,
       chatModel: j['chatModel'] as String? ?? d.chatModel,
       ttsBackend:
           TtsBackend.values.asNameMap()[j['ttsBackend']] ?? d.ttsBackend,
