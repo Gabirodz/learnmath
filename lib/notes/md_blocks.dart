@@ -620,7 +620,7 @@ class _InlineParser {
     bool hasCloser(int from, String ch, int len) {
       for (var k = from; k < toks.length; k++) {
         final t = toks[k];
-        if (t.kind == _TokKind.delim && t.delimChar == ch && t.canClose && t.text.length >= 1) {
+        if (t.kind == _TokKind.delim && t.delimChar == ch && t.canClose) {
           return true;
         }
       }
