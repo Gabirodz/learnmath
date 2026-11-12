@@ -4,15 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../chat/chat_controller.dart';
+import '../chat/chat_pane.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
 import '../notes/notes_view.dart';
 import '../notes/pdf_exporter.dart';
 import '../notes/pdf_view.dart';
 import '../player/player_view.dart';
+import 'widgets.dart';
 
-/// One lesson: Listen / Notes / PDF. Phones get three tabs; wide screens show
-/// the player next to the notes.
+/// One lesson: Listen / Notes / PDF / Chat. Phones get four tabs; wide screens
+/// show the player next to the other three.
 class LessonScreen extends ConsumerWidget {
   const LessonScreen({super.key, required this.lessonId});
 
@@ -34,9 +37,27 @@ class LessonScreen extends ConsumerWidget {
     }
 
     final wide = MediaQuery.sizeOf(context).width >= 840;
-    final listen = _ListenPane(lesson: lesson);
-    final notes = _NotesPane(lessonId: lessonId);
-    final pdf = _PdfPane(lessonId: lessonId);
+    // Index of the Chat tab in the tab controller of each layout.
+    final chatTab = wide ? 2 : 3;
+    final pdfLabel = lesson.isBookChapter ? 'Book' : 'PDF';
+
+    // Attaches an excerpt to the next chat message and shows the chat.
+    Widget withAsk(Widget Function(void Function(String quote) ask) build) =>
+        Builder(builder: (context) {
+          return build((quote) {
+            ref.read(chatQuoteProvider(lessonId).notifier).set(quote);
+            DefaultTabController.of(context).animateTo(chatTab);
+          });
+        });
+
+    final listen =
+        withAsk((ask) => _ListenPane(lesson: lesson, onAsk: ask));
+    final notes =
+        withAsk((ask) => _NotesPane(lessonId: lessonId, onAsk: ask));
+    final pdf = lesson.isBookChapter
+        ? _BookPane(lesson: lesson)
+        : _PdfPane(lessonId: lessonId);
+    final chat = ChatPane(lessonId: lessonId);
 
     final actions = [
       PopupMenuButton<String>(
@@ -46,7 +67,7 @@ class LessonScreen extends ConsumerWidget {
         itemBuilder: (_) => [
           PopupMenuItem(
             value: 'rerecord',
-            enabled: lesson.stage == LessonStage.ready,
+            enabled: lesson.stage == LessonStage.ready && lesson.hasAudio,
             child: const Text('Re-record with current voice settings'),
           ),
         ],
@@ -55,7 +76,7 @@ class LessonScreen extends ConsumerWidget {
 
     if (wide) {
       return DefaultTabController(
-        length: 2,
+        length: 3,
         child: Scaffold(
           appBar: AppBar(title: Text(lesson.title), actions: actions),
           body: Row(
@@ -66,8 +87,17 @@ class LessonScreen extends ConsumerWidget {
                 flex: 6,
                 child: Column(
                   children: [
-                    const TabBar(tabs: [Tab(text: 'Notes'), Tab(text: 'PDF')]),
-                    Expanded(child: TabBarView(children: [notes, pdf])),
+                    TabBar(tabs: [
+                      const Tab(text: 'Notes'),
+                      Tab(text: pdfLabel),
+                      const Tab(text: 'Chat'),
+                    ]),
+                    Expanded(
+                      child: TabBarView(
+                        physics: const NeverScrollableScrollPhysics(),
+                        children: [notes, pdf, chat],
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -77,22 +107,23 @@ class LessonScreen extends ConsumerWidget {
       );
     }
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: Text(lesson.title),
           actions: actions,
-          bottom: const TabBar(tabs: [
-            Tab(text: 'Listen'),
-            Tab(text: 'Notes'),
-            Tab(text: 'PDF'),
+          bottom: TabBar(tabs: [
+            const Tab(text: 'Listen'),
+            const Tab(text: 'Notes'),
+            Tab(text: pdfLabel),
+            const Tab(text: 'Chat'),
           ]),
         ),
         // Horizontal swipes belong to the player's double-tap surface and to
         // wide formulas, so tabs switch by tapping only.
         body: TabBarView(
           physics: const NeverScrollableScrollPhysics(),
-          children: [listen, notes, pdf],
+          children: [listen, notes, pdf, chat],
         ),
       ),
     );
@@ -100,15 +131,16 @@ class LessonScreen extends ConsumerWidget {
 }
 
 class _ListenPane extends ConsumerWidget {
-  const _ListenPane({required this.lesson});
+  const _ListenPane({required this.lesson, required this.onAsk});
   final Lesson lesson;
+  final void Function(String quote) onAsk;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final progress =
         ref.watch(jobProgressProvider.select((m) => m[lesson.id]));
     if (lesson.stage == LessonStage.ready && lesson.hasAudio) {
-      return PlayerView(lesson: lesson);
+      return PlayerView(lesson: lesson, onAsk: onAsk);
     }
 
     final theme = Theme.of(context);
@@ -169,6 +201,49 @@ class _ListenPane extends ConsumerWidget {
           ),
         ],
       );
+    } else if (lesson.isBookChapter) {
+      // Not read in yet, or read in but without a recording.
+      final muted = theme.textTheme.bodyMedium!
+          .copyWith(color: theme.colorScheme.onSurfaceVariant);
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(lesson.brief, style: theme.textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Text(
+            lesson.hasNotes
+                ? 'This chapter has been read in. You can read it under Notes '
+                    'and ask about it under Chat, or record an audio lecture '
+                    'that explains it.'
+                : 'The original pages are under Book. Reading the chapter in '
+                    'sends its pages to the AI service and lets you read it '
+                    'as text, ask questions about it and record a lecture.',
+            style: muted,
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 20),
+          if (!lesson.hasNotes) ...[
+            FilledButton.icon(
+              onPressed: () =>
+                  generateLesson(context, ref, lesson.id, audio: false),
+              icon: const Icon(Icons.document_scanner_outlined),
+              label: const Text('Read this chapter in'),
+            ),
+            const SizedBox(height: 8),
+          ],
+          FilledButton.tonalIcon(
+            onPressed: () =>
+                generateLesson(context, ref, lesson.id, audio: true),
+            icon: const Icon(Icons.headphones_outlined),
+            label: Text(lesson.hasNotes
+                ? 'Record an audio lecture'
+                : 'Read in and record a lecture'),
+          ),
+          const SizedBox(height: 8),
+          Text('A long chapter makes a long lecture and takes a while to record.',
+              style: muted, textAlign: TextAlign.center),
+        ],
+      );
     } else {
       content = Column(
         mainAxisSize: MainAxisSize.min,
@@ -176,7 +251,7 @@ class _ListenPane extends ConsumerWidget {
           Text(lesson.brief, textAlign: TextAlign.center),
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: () => generation.enqueue(lesson.id),
+            onPressed: () => generateLesson(context, ref, lesson.id),
             icon: const Icon(Icons.auto_awesome),
             label: const Text('Generate lesson'),
           ),
@@ -193,8 +268,9 @@ class _ListenPane extends ConsumerWidget {
 }
 
 class _NotesPane extends ConsumerWidget {
-  const _NotesPane({required this.lessonId});
+  const _NotesPane({required this.lessonId, required this.onAsk});
   final String lessonId;
+  final void Function(String quote) onAsk;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -202,9 +278,26 @@ class _NotesPane extends ConsumerWidget {
     final markdown = ref.watch(
         lessonProvider(lessonId).select((a) => a.value?.notesMarkdown));
     if (markdown == null || markdown.isEmpty) {
-      return const _Placeholder('Notes appear here once they are written.');
+      return const _Placeholder('The text appears here once it is ready.');
     }
-    return NotesView(markdown: markdown);
+    return NotesView(markdown: markdown, onAskAbout: onAsk);
+  }
+}
+
+/// The original pages of a book chapter.
+class _BookPane extends ConsumerWidget {
+  const _BookPane({required this.lesson});
+  final Lesson lesson;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final path = ref.watch(
+        courseProvider(lesson.courseId ?? '').select((a) => a.value?.bookPath));
+    if (path == null) {
+      return const _Placeholder('The book file is not available.');
+    }
+    return NotesPdfView(
+        filePath: path, initialPage: lesson.sourceStartPage ?? 1);
   }
 }
 

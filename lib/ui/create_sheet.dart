@@ -120,7 +120,22 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
                         _error = null;
                       }),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                icon: const Icon(Icons.picture_as_pdf_outlined),
+                label: const Text('Or import your own PDF book'),
+                onPressed: _busy
+                    ? null
+                    : () {
+                        final router = widget.router;
+                        Navigator.of(context).pop();
+                        router.push('/import-book');
+                      },
+              ),
+            ),
+            const SizedBox(height: 8),
             TextField(
               controller: _controller,
               enabled: !_busy,

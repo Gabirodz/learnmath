@@ -3,6 +3,22 @@ library;
 
 import 'package:learnmath/core/models.dart';
 
+/// Position of a chunk of source text within a lecture that is scripted in
+/// several requests.
+class NarrationPart {
+  const NarrationPart({
+    required this.index,
+    required this.count,
+    this.previousSections = const [],
+  });
+
+  final int index;
+  final int count;
+
+  /// Section titles already covered by earlier parts.
+  final List<String> previousSections;
+}
+
 class Prompts {
   const Prompts._();
 
@@ -107,18 +123,87 @@ PAUSE: 1''';
     required String title,
     required String notesMarkdown,
     CourseContext? course,
+    bool fromBook = false,
+    NarrationPart? part,
   }) {
     final b = StringBuffer()
       ..writeln('Write the spoken lecture script for the lesson "${title.trim()}".');
-    b.write(_courseBlock(course, forNarration: true));
+    if (fromBook) {
+      b
+        ..writeln()
+        ..writeln(
+            'The text below is not AI-written notes: it is a section of the student\'s own textbook, transcribed. The student is studying from this book, so stay faithful to it: follow its order, use its notation, and refer to results by the book\'s own numbering ("Theorem 3.2", "Definition 1.4") so the student can find them on the page. Cover every definition and result of the text; do not skip the proofs the book gives, but explain their idea and main steps instead of reading them symbol by symbol. Mention exercises only briefly, without solving them. Add the motivation and intuition the book leaves out.');
+    } else {
+      b.write(_courseBlock(course, forNarration: true));
+    }
+    if (part != null && part.count > 1) {
+      b
+        ..writeln()
+        ..writeln(
+            'This is part ${part.index + 1} of ${part.count} of one continuous lecture; the parts are recorded back to back.');
+      if (part.index > 0) {
+        b.writeln(
+            'Do not greet the listener or introduce the lecture again. Continue naturally from the previous part'
+            '${part.previousSections.isEmpty ? '' : ', which covered: ${part.previousSections.join('; ')}'}.');
+      }
+      if (part.index < part.count - 1) {
+        b.writeln(
+            'Do not give a final recap of the whole lecture and do not say goodbye: end at a natural stopping point, with at most a one-sentence recap of this part.');
+      } else {
+        b.writeln(
+            'This is the last part: finish with a recap of the main results of the whole lecture.');
+      }
+      b.writeln('Use 2 to 5 SECTION lines for this part.');
+    }
     b
       ..writeln()
-      ..writeln('Lecture notes (between the markers):')
+      ..writeln(fromBook
+          ? 'Textbook text (between the markers):'
+          : 'Lecture notes (between the markers):')
       ..writeln('<<<NOTES')
       ..writeln(notesMarkdown.trim())
       ..writeln('NOTES>>>')
       ..writeln()
       ..write('Now produce the script in the required SECTION/SAY/SHOW/PAUSE format only.');
+    return b.toString();
+  }
+
+  // ---------------------------------------------------------- transcription
+
+  static const String transcribeSystem = r"""
+You transcribe one page of a mathematics textbook from an image into Markdown with LaTeX. You are a transcriber, not an editor: reproduce what is printed, exactly and completely.
+
+Rules:
+- Transcribe ALL content of the page in reading order. Do not summarise, shorten, paraphrase, translate, explain or comment. Do not correct what you believe are mistakes. Do not add anything that is not on the page.
+- Math: inline math in `$...$`; displayed equations in `$$...$$` with the `$$` on their own lines. Use standard KaTeX-compatible LaTeX (`\mathbb`, `\mathcal`, `\operatorname`, `aligned`, `cases`, `pmatrix`). Keep equation numbers with `\tag{...}`. Reproduce every subscript, superscript, index, prime, bar, hat and quantifier exactly; when a symbol is illegible write `\text{[illegible]}` rather than guessing.
+- Structure: a chapter title is a `#` heading, section titles `##`, subsection titles `###`, keeping the book's numbering ("## 2.3 Compact operators"). Labels such as Theorem, Lemma, Proposition, Corollary, Definition, Example, Remark, Proof are written in bold with their number exactly as printed (`**Theorem 2.4.**`, `**Theorem 2.4 (Riesz).**`). Keep italics for emphasised or defined terms. Lists stay lists.
+- Leave out running headers, running footers and page numbers. Put footnotes in parentheses at the end of the paragraph that references them.
+- Figures and diagrams cannot be transcribed: write `*[Figure: <caption or a one-line description>]*` in their place. Small commutative diagrams may be given with `\begin{CD}` or `\xrightarrow` if simple; otherwise describe them.
+- If the page begins in the middle of a sentence or paragraph, begin there, without adding anything. Likewise the page may end mid-sentence.
+- Output only the transcription: no preamble, no code fence, no closing remark. If there is nothing to transcribe (blank page, or only content you were told to leave out), output exactly `[[blank]]`.""";
+
+  static String transcribeUser({
+    required int page,
+    String? textLayer,
+    String? startAtHeading,
+    String? stopBeforeHeading,
+  }) {
+    final b = StringBuffer('Transcribe this page (book page image attached).');
+    if (startAtHeading != null) {
+      b.write(
+          '\n\nOnly the part of this page from the heading "$startAtHeading" onward is wanted: if that heading appears part-way down the page, leave out everything above it. If the heading is not on this page, transcribe the whole page.');
+    }
+    if (stopBeforeHeading != null) {
+      b.write(
+          '\n\nStop before the heading "$stopBeforeHeading" if it appears on this page: leave out that heading and everything after it.');
+    }
+    if (textLayer != null && textLayer.trim().length > 80) {
+      b
+        ..write(
+            '\n\nFor reference, this is the text embedded in the PDF for this page. Its ordinary words are reliable (use them for exact spelling), but its mathematics is usually scrambled: always take formulas from the image.\n<<<TEXT\n')
+        ..write(textLayer.trim())
+        ..write('\nTEXT>>>');
+    }
     return b.toString();
   }
 

@@ -40,8 +40,14 @@ Future<bool> confirmDelete(BuildContext context, {required String what}) async {
 
 /// Starts generation for [lessonId], or points the user to settings when no
 /// API key is configured.
-void generateLesson(BuildContext context, WidgetRef ref, String lessonId) {
-  if (!ref.read(settingsProvider).hasApiKey) {
+void generateLesson(BuildContext context, WidgetRef ref, String lessonId,
+    {bool? audio}) {
+  final settings = ref.read(settingsProvider);
+  // Reading a book chapter with Mathpix is the one job that needs no key;
+  // the pipeline reports a missing key itself in that mode.
+  final mathpix =
+      settings.transcriptionBackend == TranscriptionBackend.mathpix;
+  if (!settings.hasApiKey && !mathpix) {
     final messenger = ScaffoldMessenger.of(context);
     final router = GoRouter.of(context);
     messenger.hideCurrentSnackBar();
@@ -52,7 +58,7 @@ void generateLesson(BuildContext context, WidgetRef ref, String lessonId) {
     ));
     return;
   }
-  ref.read(generationProvider).enqueue(lessonId);
+  ref.read(generationProvider).enqueue(lessonId, audio: audio);
 }
 
 class LessonTile extends ConsumerWidget {
@@ -105,16 +111,23 @@ class LessonTile extends ConsumerWidget {
       subtitle = lesson.brief.isEmpty ? 'Not generated yet' : lesson.brief;
       subtitleLines = 2;
       trailing = IconButton.filledTonal(
-        tooltip: 'Generate',
-        icon: const Icon(Icons.auto_awesome),
+        tooltip: lesson.isBookChapter ? 'Read this chapter in' : 'Generate',
+        icon: Icon(lesson.isBookChapter
+            ? Icons.document_scanner_outlined
+            : Icons.auto_awesome),
         onPressed: () => generateLesson(context, ref, lesson.id),
       );
-      onTap = () => generateLesson(context, ref, lesson.id);
+      // A book chapter can already be opened: its pages are in the PDF tab.
+      if (!lesson.isBookChapter) {
+        onTap = () => generateLesson(context, ref, lesson.id);
+      }
     } else {
       final ms = lesson.audioDurationMs;
       final mins = ms == null ? null : (ms / 60000).ceil();
-      subtitle = mins == null ? 'Ready' : '$mins min';
-      if (lesson.completed) {
+      subtitle = mins == null ? 'Ready to read and ask' : '$mins min';
+      if (!lesson.hasAudio) {
+        trailing = Icon(Icons.menu_book_outlined, color: scheme.onSurfaceVariant);
+      } else if (lesson.completed) {
         trailing = Icon(Icons.check_circle, color: scheme.primary, semanticLabel: 'Completed');
       } else if (lesson.lastPositionMs > 0 && ms != null && ms > 0) {
         trailing = SizedBox(

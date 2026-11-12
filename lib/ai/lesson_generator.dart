@@ -49,6 +49,8 @@ class LessonGenerator {
     required String title,
     required String notesMarkdown,
     CourseContext? course,
+    bool fromBook = false,
+    NarrationPart? part,
     void Function(int chars)? onProgress,
   }) async {
     final raw = await client.chat(
@@ -57,7 +59,12 @@ class LessonGenerator {
       messages: [
         const ChatMessage.system(Prompts.narrationSystem),
         ChatMessage.user(Prompts.narrationUser(
-            title: title, notesMarkdown: notesMarkdown, course: course)),
+          title: title,
+          notesMarkdown: notesMarkdown,
+          course: course,
+          fromBook: fromBook,
+          part: part,
+        )),
       ],
       onProgress: onProgress,
     );

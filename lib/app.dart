@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import 'books/import_screen.dart';
 import 'ui/course_screen.dart';
 import 'ui/lesson_screen.dart';
 import 'ui/library_screen.dart';
@@ -18,6 +19,7 @@ final _router = GoRouter(
       builder: (_, state) => LessonScreen(lessonId: state.pathParameters['id']!),
     ),
     GoRoute(path: '/settings', builder: (_, _) => const SettingsScreen()),
+    GoRoute(path: '/import-book', builder: (_, _) => const BookImportScreen()),
   ],
 );
 

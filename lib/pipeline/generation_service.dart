@@ -4,7 +4,11 @@ import 'dart:io';
 import 'package:uuid/uuid.dart';
 
 import '../ai/lesson_generator.dart';
+import '../ai/narration_parts.dart';
 import '../ai/openrouter_client.dart';
+import '../ai/prompts.dart';
+import '../books/mathpix_client.dart';
+import '../books/transcriber.dart';
 import '../core/models.dart';
 import '../core/storage.dart';
 import '../tts/kokoro_engine.dart';
@@ -23,6 +27,8 @@ class JobProgress {
 }
 
 /// Orchestrates lesson creation: notes -> narration script -> audio.
+/// For a chapter of an imported book the "notes" are a transcription of its
+/// pages, and recording the lecture is a separate, optional step.
 ///
 /// Jobs run one at a time (on-device TTS is CPU-bound and model calls cost
 /// money), and every stage persists its result, so a failed or interrupted
@@ -47,6 +53,9 @@ class GenerationService {
   static const _uuid = Uuid();
   final _queue = <String>[];
   final _cancelled = <String>{};
+
+  /// Explicit per-job choice of whether to go on to record audio.
+  final _audioWanted = <String, bool>{};
   bool _running = false;
 
   bool isQueued(String lessonId) => _queue.contains(lessonId);
@@ -114,7 +123,12 @@ class GenerationService {
   }
 
   /// Queues a lesson for (continued) generation.
-  void enqueue(String lessonId) {
+  ///
+  /// [audio] says whether to go on to record the lecture. By default AI
+  /// lessons are recorded, while a book chapter is first only transcribed
+  /// (for reading and chat) and recorded when queued again.
+  void enqueue(String lessonId, {bool? audio}) {
+    if (audio != null) _audioWanted[lessonId] = audio;
     if (_queue.contains(lessonId)) return;
     _cancelled.remove(lessonId);
     _queue.add(lessonId);
@@ -161,6 +175,7 @@ class GenerationService {
         } finally {
           _queue.remove(id);
           _cancelled.remove(id);
+          _audioWanted.remove(id);
           onProgress(id, null);
         }
       }
@@ -172,7 +187,9 @@ class GenerationService {
   Future<void> _run(String id) async {
     var lesson = await repo.getLesson(id);
     if (lesson == null) return;
-    final settings = _requireKey();
+    final settings = readSettings();
+    final wantAudio =
+        _audioWanted[id] ?? (!lesson.isBookChapter || lesson.hasNotes);
     void check() {
       if (_cancelled.contains(id)) throw const GenerationCancelled();
     }
@@ -183,13 +200,37 @@ class GenerationService {
       return updated;
     }
 
+    // Mathpix-only transcription is the one job that needs no OpenRouter key.
+    final needsKey = wantAudio ||
+        !lesson.isBookChapter ||
+        settings.transcriptionBackend != TranscriptionBackend.mathpix;
+    if (needsKey && !settings.hasApiKey) throw const MissingApiKey();
+
     final client = OpenRouterClient(apiKey: settings.apiKey);
     TtsEngine? engine;
     try {
       final generator = LessonGenerator(client, model: settings.chatModel);
       final course = await _courseContext(lesson);
 
-      if (!lesson.hasNotes) {
+      if (!lesson.hasNotes && lesson.isBookChapter) {
+        final book = await repo.getCourse(lesson.courseId ?? '');
+        final bookPath = book?.bookPath;
+        if (bookPath == null || !await File(bookPath).exists()) {
+          throw TranscriptionException('The book file is missing.');
+        }
+        lesson = await update((l) =>
+            l.copyWith(stage: LessonStage.transcribing, clearError: true));
+        onProgress(id, const JobProgress('Reading the chapter…'));
+        final text = await ChapterTranscriber.transcribe(
+          settings: settings,
+          pdfPath: bookPath,
+          chapter: lesson,
+          onProgress: (label, f) => onProgress(id, JobProgress(label, f)),
+          isCancelled: () => _cancelled.contains(id),
+        );
+        check();
+        lesson = await update((l) => l.copyWith(notesMarkdown: text));
+      } else if (!lesson.hasNotes) {
         lesson = await update((l) =>
             l.copyWith(stage: LessonStage.generatingNotes, clearError: true));
         onProgress(id, const JobProgress('Writing lecture notes…'));
@@ -210,18 +251,44 @@ class GenerationService {
             ));
       }
 
+      if (!wantAudio) {
+        await update(
+            (l) => l.copyWith(stage: LessonStage.ready, clearError: true));
+        return;
+      }
+
       if (lesson.segments.isEmpty) {
         lesson = await update((l) => l.copyWith(
             stage: LessonStage.generatingNarration, clearError: true));
-        onProgress(id, const JobProgress('Preparing the lecture script…'));
-        final segments = await generator.generateNarration(
-          title: lesson.title,
-          notesMarkdown: lesson.notesMarkdown!,
-          course: course,
-          onProgress: (chars) => onProgress(id,
-              JobProgress('Preparing the lecture script… ${_kChars(chars)}')),
-        );
-        check();
+        final fromBook = lesson.isBookChapter;
+        // A book chapter is far longer than one model answer can narrate, so
+        // it is scripted in consecutive parts.
+        final parts = fromBook
+            ? splitForNarration(stripPageMarkers(lesson.notesMarkdown!))
+            : [SourcePart(lesson.notesMarkdown!, const [])];
+        final segments = <NarrationSegment>[];
+        final covered = <String>[];
+        for (var i = 0; i < parts.length; i++) {
+          final label = parts.length == 1
+              ? 'Preparing the lecture script…'
+              : 'Preparing the lecture script… part ${i + 1} of ${parts.length}';
+          onProgress(id, JobProgress(label, i / parts.length));
+          segments.addAll(await generator.generateNarration(
+            title: lesson.title,
+            notesMarkdown: parts[i].text,
+            course: course,
+            fromBook: fromBook,
+            part: NarrationPart(
+              index: i,
+              count: parts.length,
+              previousSections: List.of(covered),
+            ),
+            onProgress: (chars) => onProgress(
+                id, JobProgress('$label ${_kChars(chars)}', i / parts.length)),
+          ));
+          covered.addAll(parts[i].sections);
+          check();
+        }
         lesson = await update((l) => l.copyWith(segments: segments));
       }
 
@@ -317,6 +384,9 @@ class GenerationService {
 
   static String _describe(Object e) {
     if (e is MissingApiKey) return e.toString();
+    if (e is MathpixException || e is TranscriptionException) {
+      return e.toString();
+    }
     if (e is SocketException) return 'No network connection.';
     if (e is TimeoutException) return 'The request timed out.';
     if (e is FormatException) {

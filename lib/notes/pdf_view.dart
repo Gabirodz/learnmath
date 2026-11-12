@@ -12,17 +12,21 @@ import 'package:share_plus/share_plus.dart';
 /// `pdfrxFlutterInitialize()` at startup only if you use the pdfrx document
 /// API directly before any viewer exists.
 class NotesPdfView extends StatelessWidget {
-  const NotesPdfView({super.key, required this.filePath});
+  const NotesPdfView({super.key, required this.filePath, this.initialPage = 1});
 
   final String filePath;
 
+  /// 1-based page shown when the document opens.
+  final int initialPage;
+
   @override
-  Widget build(BuildContext context) => _PdfBody(filePath: filePath);
+  Widget build(BuildContext context) => _PdfBody(filePath: filePath, initialPage: initialPage);
 }
 
 class _PdfBody extends StatefulWidget {
-  const _PdfBody({required this.filePath});
+  const _PdfBody({required this.filePath, required this.initialPage});
   final String filePath;
+  final int initialPage;
 
   @override
   State<_PdfBody> createState() => _PdfBodyState();
@@ -58,6 +62,7 @@ class _PdfBodyState extends State<_PdfBody> {
           PdfViewer.file(
             widget.filePath,
             controller: _controller,
+            initialPageNumber: widget.initialPage,
             params: PdfViewerParams(
               margin: 8,
               backgroundColor: cs.surfaceContainerHighest,

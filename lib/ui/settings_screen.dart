@@ -20,6 +20,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _model;
   late final TextEditingController _ttsModel;
   late final TextEditingController _ttsVoice;
+  late final TextEditingController _visionModel;
+  late final TextEditingController _mathpixId;
+  late final TextEditingController _mathpixKey;
   Timer? _debounce;
   bool _showKey = false;
 
@@ -36,6 +39,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _model = TextEditingController(text: s.chatModel);
     _ttsModel = TextEditingController(text: s.openRouterTtsModel);
     _ttsVoice = TextEditingController(text: s.openRouterTtsVoice);
+    _visionModel = TextEditingController(text: s.visionModel);
+    _mathpixId = TextEditingController(text: s.mathpixAppId);
+    _mathpixKey = TextEditingController(text: s.mathpixAppKey);
     _refreshInstalled();
   }
 
@@ -46,6 +52,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _model.dispose();
     _ttsModel.dispose();
     _ttsVoice.dispose();
+    _visionModel.dispose();
+    _mathpixId.dispose();
+    _mathpixKey.dispose();
     super.dispose();
   }
 
@@ -215,6 +224,75 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       labelText: 'Voice name', border: OutlineInputBorder()),
                   onChanged: (v) => _debounced(
                       (s) => s.copyWith(openRouterTtsVoice: v.trim())),
+                  onTapOutside: (_) => FocusScope.of(context).unfocus(),
+                ),
+              ],
+              section('Your books'),
+              Text(
+                'How the pages of an imported PDF are read into text and formulas.',
+                style: text.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 12),
+              SegmentedButton<TranscriptionBackend>(
+                segments: const [
+                  ButtonSegment(
+                      value: TranscriptionBackend.openRouterVision,
+                      label: Text('OpenRouter')),
+                  ButtonSegment(
+                      value: TranscriptionBackend.mathpix,
+                      label: Text('Mathpix')),
+                ],
+                selected: {s.transcriptionBackend},
+                onSelectionChanged: (v) =>
+                    _update((s) => s.copyWith(transcriptionBackend: v.first)),
+              ),
+              const SizedBox(height: 16),
+              if (s.transcriptionBackend ==
+                  TranscriptionBackend.openRouterVision)
+                TextField(
+                  controller: _visionModel,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: 'Page-reading model',
+                    hintText: AppSettings.defaultVisionModel,
+                    border: OutlineInputBorder(),
+                    helperText:
+                        'Must accept images. Default: ${AppSettings.defaultVisionModel}. '
+                        'Try a stronger model if formulas come out wrong.',
+                    helperMaxLines: 3,
+                  ),
+                  onChanged: (v) => _debounced((s) => s.copyWith(
+                      visionModel: v.trim().isEmpty
+                          ? AppSettings.defaultVisionModel
+                          : v.trim())),
+                  onTapOutside: (_) => FocusScope.of(context).unfocus(),
+                )
+              else ...[
+                TextField(
+                  controller: _mathpixId,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                      labelText: 'Mathpix app id',
+                      border: OutlineInputBorder()),
+                  onChanged: (v) =>
+                      _debounced((s) => s.copyWith(mathpixAppId: v.trim())),
+                  onTapOutside: (_) => FocusScope.of(context).unfocus(),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _mathpixKey,
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    labelText: 'Mathpix app key',
+                    border: OutlineInputBorder(),
+                    helperText:
+                        'Stored only on this device. Chapters are uploaded to Mathpix when you open them.',
+                    helperMaxLines: 3,
+                  ),
+                  onChanged: (v) =>
+                      _debounced((s) => s.copyWith(mathpixAppKey: v.trim())),
                   onTapOutside: (_) => FocusScope.of(context).unfocus(),
                 ),
               ],

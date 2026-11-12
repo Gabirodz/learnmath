@@ -22,10 +22,14 @@ String formatClock(Duration d) {
 /// The listening screen: subtitles in the middle (tap = play/pause,
 /// double-tap left/right = skip back/forward), transport controls below.
 class PlayerView extends ConsumerStatefulWidget {
-  const PlayerView({super.key, required this.lesson});
+  const PlayerView({super.key, required this.lesson, this.onAsk});
 
   /// Must have audio.
   final Lesson lesson;
+
+  /// Called with the last few spoken sentences when the listener wants to
+  /// ask about what was just said.
+  final void Function(String quote)? onAsk;
 
   @override
   ConsumerState<PlayerView> createState() => _PlayerViewState();
@@ -72,6 +76,15 @@ class _PlayerViewState extends ConsumerState<PlayerView> {
     ref
         .read(settingsProvider.notifier)
         .update((s) => s.copyWith(playbackSpeed: speed));
+  }
+
+  void _ask() {
+    final segs = _player.segments;
+    if (segs.isEmpty) return;
+    final i = _player.segmentIndex.value.clamp(0, segs.length - 1);
+    final from = i - 2 < 0 ? 0 : i - 2;
+    _player.pause();
+    widget.onAsk!([for (var k = from; k <= i; k++) segs[k].subtitle].join(' '));
   }
 
   void _showChapters() {
@@ -128,7 +141,7 @@ class _PlayerViewState extends ConsumerState<PlayerView> {
           player: _player,
           skipSeconds: skipSeconds,
           onSpeed: _setSpeed,
-          onShowChapters: _showChapters,
+          onAsk: widget.onAsk == null ? null : _ask,
         ),
       ],
     );
@@ -320,13 +333,13 @@ class _Transport extends StatelessWidget {
     required this.player,
     required this.skipSeconds,
     required this.onSpeed,
-    required this.onShowChapters,
+    required this.onAsk,
   });
 
   final LecturePlayer player;
   final int skipSeconds;
   final ValueChanged<double> onSpeed;
-  final VoidCallback onShowChapters;
+  final VoidCallback? onAsk;
 
   @override
   Widget build(BuildContext context) {
@@ -403,10 +416,10 @@ class _Transport extends StatelessWidget {
                   onPressed: player.nextSection,
                 ),
                 IconButton(
-                  tooltip: 'Sections',
+                  tooltip: 'Ask about what was just said',
                   iconSize: 28,
-                  icon: const Icon(Icons.format_list_bulleted_rounded),
-                  onPressed: onShowChapters,
+                  icon: const Icon(Icons.question_answer_outlined),
+                  onPressed: onAsk,
                 ),
               ],
             ),
