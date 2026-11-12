@@ -76,9 +76,16 @@ class ChapterTranscriber {
     void Function(String label, double? fraction)? onProgress,
     bool Function()? isCancelled,
   }) async {
-    final total = end - start + 1;
     final client = OpenRouterClient(apiKey: settings.apiKey);
     final pdf = await PdfSource.open(pdfPath);
+    // Chapter ranges come from bookmarks and can overshoot the file.
+    final last = end > pdf.pageCount ? pdf.pageCount : end;
+    final total = last - start + 1;
+    if (total < 1) {
+      await pdf.close();
+      client.close();
+      throw TranscriptionException('Page $start is not in this book.');
+    }
     final pages = List<String?>.filled(total, null);
     var done = 0;
     try {

@@ -26,9 +26,8 @@ class TtsException implements Exception {
 
 /// Cloud TTS through OpenRouter's `/audio/speech` endpoint.
 ///
-/// Requests raw PCM, which the OpenAI-style speech models return as 24 kHz
-/// 16-bit mono. Providers with a different PCM rate would play at the wrong
-/// pitch; [sampleRate] is the place to special-case them.
+/// Requests raw 16-bit mono PCM. The sample rate differs between providers
+/// (24 kHz, 44.1 kHz, ...) and is read from each response.
 class OpenRouterTtsEngine implements TtsEngine {
   OpenRouterTtsEngine({
     required this.client,
@@ -44,8 +43,10 @@ class OpenRouterTtsEngine implements TtsEngine {
       'You are a university mathematics lecturer. Speak clearly and calmly, '
       'at a measured teaching pace, with natural emphasis on key terms.';
 
+  int _sampleRate = 24000;
+
   @override
-  int get sampleRate => 24000;
+  int get sampleRate => _sampleRate;
 
   @override
   int get maxConcurrency => 4;
@@ -58,13 +59,14 @@ class OpenRouterTtsEngine implements TtsEngine {
     Object? lastError;
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
-        final bytes = await client.speech(
+        final audio = await client.speechPcm(
           model: model,
           input: text,
           voice: voice,
-          responseFormat: 'pcm',
           instructions: _instructions,
         );
+        _sampleRate = audio.sampleRate;
+        final bytes = audio.bytes;
         final even = bytes.length & ~1;
         // Copy: the response buffer may not be 2-byte aligned.
         final copy = Uint8List.fromList(Uint8List.sublistView(bytes, 0, even));

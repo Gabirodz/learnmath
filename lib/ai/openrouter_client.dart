@@ -168,6 +168,29 @@ class OpenRouterClient {
     return text;
   }
 
+  /// Text-to-speech as raw 16-bit mono PCM, with the sample rate the provider
+  /// reports in its `Content-Type` (e.g. `audio/pcm;rate=44100`); providers
+  /// differ, and playing at the wrong rate shifts speed and pitch.
+  Future<({Uint8List bytes, int sampleRate})> speechPcm({
+    required String model,
+    required String input,
+    required String voice,
+    String? instructions,
+  }) async {
+    int? rate;
+    final bytes = await speech(
+      model: model,
+      input: input,
+      voice: voice,
+      instructions: instructions,
+      onContentType: (type) {
+        final m = RegExp(r'rate=(\d+)').firstMatch(type);
+        if (m != null) rate = int.parse(m.group(1)!);
+      },
+    );
+    return (bytes: bytes, sampleRate: rate ?? 24000);
+  }
+
   /// Text-to-speech via POST /audio/speech. Returns the raw audio bytes.
   Future<Uint8List> speech({
     required String model,
@@ -176,6 +199,7 @@ class OpenRouterClient {
     String responseFormat = 'pcm',
     double? speed,
     String? instructions,
+    void Function(String contentType)? onContentType,
   }) async {
     final req = http.Request('POST', Uri.parse('$_baseUrl/audio/speech'))
       ..headers.addAll(_headers)
@@ -192,6 +216,7 @@ class OpenRouterClient {
     if (resp.statusCode != 200) {
       throw await _errorFromResponse(resp);
     }
+    onContentType?.call(resp.headers['content-type'] ?? '');
     try {
       final bytes = await resp.stream.toBytes();
       if (bytes.isEmpty) {
