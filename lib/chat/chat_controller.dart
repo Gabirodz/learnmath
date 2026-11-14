@@ -147,7 +147,7 @@ class ChatController extends Notifier<ChatState> {
       final lesson = await ref.read(lessonProvider(lessonId).future);
       if (lesson == null) throw OpenRouterException('This lesson no longer exists.');
       final reply = await OpenRouterClient(apiKey: settings.apiKey).chat(
-        model: settings.chatModel,
+        model: settings.lessonModel,
         messages: buildChatMessages(lesson: lesson, history: state.turns),
         onDelta: (d) {
           if (_disposed || gen != _generation) return;

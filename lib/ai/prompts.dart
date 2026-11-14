@@ -53,11 +53,21 @@ Rules:
 
   // ------------------------------------------------------------------ notes
 
-  static const String notesSystem = r'''
+  static const String notesSystem =
+      '$_notesIntro$_notesAlone$_notesRules';
+
+  static const String _notesIntro = r'''
 You write rigorous but readable lecture notes in mathematics for a graduate student. The notes will be rendered from Markdown with KaTeX on a narrow phone screen, and also exported to PDF.
 
 Output rules:
+''';
+
+  /// The rule that only holds when the notes are the whole answer.
+  static const String _notesAlone = r'''
 - Output ONLY the notes document in Markdown. No preamble, no closing remarks, no "Here are the notes", and do NOT wrap the document in a code fence.
+''';
+
+  static const String _notesRules = r'''
 - Start with a single `#` title line, then use `##` for sections and `###` for subsections.
 - Math: inline math with `$...$`, display math with `$$...$$` where the `$$` delimiters are on their own lines. Never use `\(...\)`, `\[...\]`, `\begin{equation}` or other environments outside `$$`.
 - Use only KaTeX-compatible LaTeX. No custom macros, no `\newcommand`, no `\def`, no tikz or other pictures, no `\usepackage`. Prefer standard commands (`\mathbb`, `\mathcal`, `\varepsilon`, `\to`, `\subseteq`, `\operatorname{...}`, `\begin{aligned}...\end{aligned}`, `\begin{cases}...\end{cases}`).
@@ -67,10 +77,130 @@ Output rules:
 
 Content requirements:
 - Mathematically correct and precise: state hypotheses explicitly, quantifiers in the right order, and define every object before using it.
+- Treat every statement you are about to write as something to prove or disprove, not to assume. State each named theorem with its full hypotheses, as a standard textbook does; do not weaken, strengthen or generalise it. If the request describes a result imprecisely or wrongly, give the correct statement and say in a short remark what was corrected.
+- No step of a proof may rest on a fact that is neither proved in these notes, nor a named standard result whose hypotheses you have checked hold here. Never write "by a standard argument" or "it is easy to see" for a step that carries the proof; either prove it or say explicitly that it is quoted without proof and from where.
+- Do not cite specific papers, page numbers or theorem numbers of books.
 - Give a proof for each main theorem; for long or technical results give a clear proof sketch and say it is a sketch. Short lemmas get full proofs.
 - Include motivation for each definition and at least two worked examples (including a non-example or a counterexample where instructive) and, where useful, a short remark on intuition.
 - End with `## Summary` (a short bullet list of the key facts) and `## Exercises` with 2-4 exercises of varied difficulty (no solutions).
 - Length: thorough but focused, roughly 1200-2200 words.''';
+
+  /// Appended to [notesSystem] when the lesson should carry SymPy checks.
+  static const String checksAddendum = '$_checksRules$_checksAlone';
+
+  static const String _checksRules = r'''
+
+Machine checks:
+After the notes document, output a block of SymPy checks. A program, not you, will run them, so that a wrong computation in the notes is caught. Format, exactly:
+
+<<<CHECKS
+CHECK: <where in the notes the claim is, for example "Example 2: integral of x e^x">
+<Python lines>
+CHECK: <next claim>
+<Python lines>
+CHECKS>>>
+
+Rules for the checks:
+- Write one check for every concrete computation the notes state as a fact: derivatives, integrals, limits, sums and series, solutions of equations, matrix computations (determinant, inverse, eigenvalues, rank), polynomial factorisations, modular and group-order arithmetic, explicit examples and counterexamples with numbers in them. Typically 3 to 10 checks.
+- Assert exactly what the notes claim, with the same expressions and values as in the notes. Do not check a different or easier statement.
+- Each check is independent Python: `from sympy import *` has already been run and nothing else is defined, so declare your own symbols in every check. Each check must contain at least one `assert` and must fail (AssertionError) if the claim in the notes is false.
+- Robust ways to assert: `assert simplify(lhs - rhs) == 0`; `assert lhs.equals(rhs)`; for identities SymPy cannot simplify, compare numerically at several points, for example `assert all(abs(N((lhs - rhs).subs(x, v))) < 1e-9 for v in [0.3, 1.7, 2.9])`. For an antiderivative, differentiate it and compare with the integrand rather than comparing two antiderivatives.
+- Keep every check fast (well under two seconds): no symbolic integrals or sums that SymPy may not be able to do, no large matrices, no loops over large ranges.
+- No imports other than from `sympy`, no input, no files, no network, no plotting, no printing.
+- Do not write checks for conceptual statements, definitions or general theorems; SymPy cannot test those. If the notes contain no concrete computation, output the two marker lines with nothing between them.
+- The block is not part of the notes: do not mention it in the notes''';
+
+  static const String _checksAlone = r''', and write nothing after `CHECKS>>>`.''';
+
+  /// Sent with [notesSystem] plus [checksAddendum] when checks of freshly
+  /// written notes failed.
+  static String repairUser({
+    required String title,
+    required String notesMarkdown,
+    required String checksBlock,
+    required String failures,
+  }) =>
+      'You wrote the lecture notes below for the lesson "${title.trim()}". '
+      'Their SymPy checks were run and some assertions failed, so the notes '
+      'and SymPy disagree about a computation.\n\n'
+      'For each failed check, redo the computation carefully and decide which '
+      'side is wrong. If the notes are wrong, correct them, including '
+      'everything that depended on the wrong value. If the check is wrong (it '
+      'asserts something other than what the notes say, or misuses SymPy), '
+      'correct the check instead and leave the notes as they are. Change '
+      'nothing else: every other sentence, formula and heading stays as it '
+      'is.\n\n'
+      'Output the complete corrected notes followed by the complete checks '
+      'block, in the same format as before, and nothing else.\n\n'
+      'Failed checks:\n$failures\n\n'
+      'Notes (between the markers):\n<<<NOTES\n${notesMarkdown.trim()}\nNOTES>>>\n\n'
+      'Checks as they were run:\n$checksBlock';
+
+  // ----------------------------------------------------------- proof review
+
+  static const String verifySystem = r'''
+You are a referee checking graduate lecture notes in mathematics for errors before they reach a student who cannot easily detect them. You did not write these notes. Read every definition, theorem statement and proof step and look for mathematical errors only:
+
+- a theorem, lemma or definition stated differently from the standard one: a missing or wrong hypothesis, a conclusion that is too strong, quantifiers in the wrong order;
+- a proof step that does not follow from what precedes it, or that silently uses a fact which was neither proved in the notes nor is a standard result whose hypotheses hold at that point (a smuggled premise);
+- a step justified only by "clearly", "by a standard argument" or "it is easy to see" that in fact carries the proof and is not routine;
+- a named result applied where its hypotheses are not satisfied;
+- an example or counterexample that does not have the property claimed;
+- a wrong computation.
+
+Do not report style, ordering, level of detail, notation preferences, missing topics, or proofs that are explicitly marked as sketches merely for being sketches. Do not report something only because you are unsure; work it out first, and report it only if you can say what is wrong.
+
+Output format, strictly line-based, nothing else:
+
+ISSUE: <one line: what is wrong>
+WHERE: <the statement or step, quoted briefly or named, e.g. "Proof of Theorem 2, second paragraph">
+WHY: <the mathematical reason, concretely; give a counterexample when a statement is false>
+FIX: <the correct statement or step>
+
+Repeat the four lines for each issue, most serious first. If you find no mathematical error, output exactly:
+
+NO ISSUES''';
+
+  static String verifyUser({required String title, required String notesMarkdown}) =>
+      'Referee these lecture notes for the lesson "${title.trim()}".\n\n'
+      '<<<NOTES\n${notesMarkdown.trim()}\nNOTES>>>';
+
+  static const String judgeSystem = r'''
+A referee has reported possible mathematical errors in lecture notes. Referees of this kind are thorough but raise false alarms about one time in four. For each reported issue, decide independently whether it is a real mathematical error in the notes as written. Re-derive the point yourself; do not defer to the referee and do not defend the notes.
+
+Output exactly one line per issue, in order, nothing else:
+
+VERDICT <number>: REAL - <one sentence>
+or
+VERDICT <number>: FALSE ALARM - <one sentence>''';
+
+  static String judgeUser({
+    required String title,
+    required String notesMarkdown,
+    required String issues,
+  }) =>
+      'Lesson: "${title.trim()}"\n\nReported issues:\n$issues\n\n'
+      'Notes (between the markers):\n<<<NOTES\n${notesMarkdown.trim()}\nNOTES>>>';
+
+  /// Sent with [notesSystem] (plus [checksAddendum]) to rewrite notes whose
+  /// review found real errors.
+  static String proofRepairUser({
+    required String title,
+    required String notesMarkdown,
+    required String issues,
+  }) =>
+      'You wrote the lecture notes below for the lesson "${title.trim()}". '
+      'An independent referee found the mathematical errors listed, and a '
+      'second reading confirmed them.\n\n'
+      'Correct each one: restate results with their right hypotheses, supply '
+      'or repair the proof steps, and fix everything that depended on them. '
+      'If an error cannot be repaired within the lesson, state the result '
+      'correctly and say plainly that its proof is omitted. Change nothing '
+      'else: every other sentence, formula and heading stays as it is.\n\n'
+      'Output the complete corrected notes in the same format as before, and '
+      'nothing else.\n\n'
+      'Confirmed errors:\n$issues\n\n'
+      'Notes (between the markers):\n<<<NOTES\n${notesMarkdown.trim()}\nNOTES>>>';
 
   static String notesUser({
     required String title,
@@ -90,7 +220,10 @@ Content requirements:
 
   // -------------------------------------------------------------- narration
 
-  static const String narrationSystem = r'''
+  static const String narrationSystem =
+      '$_scriptRules$_scriptAlone$_scriptLength';
+
+  static const String _scriptRules = r'''
 You are a gifted mathematics lecturer recording an audio lecture. A graduate student will LISTEN to it while walking or doing a low-attention task, probably without looking at a screen, so it must be fully understandable by ear alone. You are given the written lecture notes for the lesson. The recording is NOT a reading of the notes: it is you, explaining them. Motivate each idea before stating it, state it clearly, then restate it in other words or with an example, walk through proofs one step at a time saying why each step works, and recap at the end of every section. Signpost often ("first", "the key idea is", "so what have we shown?"). Prefer concrete intuition over symbol-pushing. Do not read out long formulas; describe what they say. A listener cannot re-read, so repeat the one or two crucial things in different words.
 
 Output format, strictly line-based. Every line starts with one of these keys:
@@ -106,7 +239,13 @@ Rules:
 - SHOW is included only when that SAY contains math and seeing the written form helps; it uses `$...$` for inline LaTeX (keep it short, no display `$$`). SHOW belongs to the SAY directly above it. Never put SHOW without a SAY before it.
 - PAUSE is the silence in seconds after the preceding segment. Omit it for ordinary flow. Use about 1 after a definition or a key statement; 2 to 3 after a theorem statement or before a proof step that needs digesting; 4 to 6 after posing a question to the listener (for example "Pause for a moment and think about why this must be true.").
 - SECTION lines mark the start of a chapter and apply to the next SAY. Use 4 to 8 sections per lecture, starting with a short introduction and ending with a recap section that restates the main results and what comes next.
+''';
+
+  static const String _scriptAlone = r'''
 - Output nothing else: no commentary, no Markdown, no code fences, no blank-line prose.
+''';
+
+  static const String _scriptLength = r'''
 - Length: aim for a lecture of roughly 12 to 20 minutes of speech (about 1800 to 3000 words of SAY text), unless the notes are very short, in which case cover them fully without padding.
 
 Example of the style:
@@ -125,6 +264,7 @@ PAUSE: 1''';
     CourseContext? course,
     bool fromBook = false,
     NarrationPart? part,
+    bool recall = false,
   }) {
     final b = StringBuffer()
       ..writeln('Write the spoken lecture script for the lesson "${title.trim()}".');
@@ -155,6 +295,12 @@ PAUSE: 1''';
       }
       b.writeln('Use 2 to 5 SECTION lines for this part.');
     }
+    if (recall && (part == null || part.index == part.count - 1)) {
+      b
+        ..writeln()
+        ..writeln(
+            _recall);
+    }
     b
       ..writeln()
       ..writeln(fromBook
@@ -167,6 +313,138 @@ PAUSE: 1''';
       ..write('Now produce the script in the required SECTION/SAY/SHOW/PAUSE format only.');
     return b.toString();
   }
+
+  static const String _recall =
+      'After the recap, end with one more SECTION titled "Check yourself": three or four short questions the listener answers from memory, on the main definitions and results of this lecture. For each: a SAY with the question, then PAUSE: 7, then a SAY giving the answer in one or two sentences. Say before the first question that there will be a pause to think after each one.';
+
+  // ------------------------------------------------------- written elsewhere
+
+  /// One self-contained prompt for writing a whole lesson (notes, checks and
+  /// lecture script) with an assistant outside the app. The answer is read
+  /// by `parseImportedLesson`. It carries the same rules as the prompts the
+  /// app sends itself.
+  ///
+  /// For a lesson of a course, [topic] is its title, [brief] what the outline
+  /// says it covers, and [course] where it sits among the other lessons.
+  static String externalLesson(
+    String topic, {
+    String brief = '',
+    CourseContext? course,
+    bool withChecks = true,
+    bool recall = true,
+  }) {
+    final parts = withChecks ? 'three' : 'two';
+    final script = withChecks ? 3 : 2;
+    final b = StringBuffer()
+      ..writeln(
+          'Write a complete mathematics lesson for me. I will import your answer into LearnMath, an app that displays the lecture notes and records an audio lecture from the script, so the format described here must be followed exactly.')
+      ..writeln()
+      ..writeln('Lesson topic: ${topic.trim()}');
+    if (brief.trim().isNotEmpty) {
+      b.writeln('What it should cover: ${brief.trim()}');
+    }
+    b
+      ..write(_courseBlock(course))
+      ..writeln()
+      ..writeln(
+          'The lesson has $parts parts, in this order: lecture notes, '
+          '${withChecks ? 'machine checks of the computations in the notes, ' : ''}'
+          'and the script of a spoken lecture that explains those notes.')
+      ..writeln()
+      ..writeln('ANSWER FORMAT')
+      ..writeln()
+      ..writeln(
+          'Put your whole answer in ONE code block fenced with four backticks (````), so that I can copy it without the LaTeX and the line structure being lost. Write nothing before or after the code block, and use no code fences inside it. If you cannot finish in one message, stop at the end of a line; when I say "continue", go on in a new code block exactly where you stopped, without repeating anything. Inside the code block, exactly this structure:')
+      ..writeln()
+      ..writeln('<<<NOTES')
+      ..writeln('(part 1: the lecture notes)')
+      ..writeln('NOTES>>>');
+    if (withChecks) {
+      b
+        ..writeln('<<<CHECKS')
+        ..writeln('(part 2: the machine checks)')
+        ..writeln('CHECKS>>>');
+    }
+    b
+      ..writeln('<<<SCRIPT')
+      ..writeln('(part $script: the lecture script)')
+      ..writeln('SCRIPT>>>')
+      ..writeln()
+      ..writeln('PART 1: LECTURE NOTES')
+      ..write(_notesIntro)
+      ..writeln(
+          '- Write the notes document in Markdown between the `<<<NOTES` and `NOTES>>>` lines.')
+      ..writeln(_notesRules);
+    if (withChecks) {
+      b
+        ..writeln()
+        ..write('PART 2: MACHINE CHECKS')
+        ..write(_checksRules.replaceFirst(
+            'Machine checks:\nAfter the notes document, output',
+            'After the notes, write'))
+        ..writeln('.');
+    }
+    b
+      ..writeln()
+      ..writeln('PART $script: LECTURE SCRIPT')
+      ..write(_scriptRules.replaceFirst(
+          'You are given the written lecture notes for the lesson.',
+          'The script is based on the lecture notes you wrote in part 1.'))
+      ..writeln(
+          '- Between the `<<<SCRIPT` and `SCRIPT>>>` lines write only such lines: no commentary, no Markdown, no blank-line prose.')
+      ..write(_scriptLength);
+    if (recall) {
+      b
+        ..writeln()
+        ..writeln()
+        ..write(_recall);
+    }
+    if (course != null) {
+      b
+        ..writeln()
+        ..writeln()
+        ..write('Early on in the script, briefly say where this lesson sits '
+            'in the course (lesson ${course.lessonIndex + 1} of '
+            '${course.lessonTitles.length}), and at the end hint at what '
+            'comes next.');
+    }
+    b
+      ..writeln()
+      ..writeln()
+      ..write(
+          'Now write the lesson on "${topic.trim()}" in the answer format above: one code block with four backticks, nothing outside it.');
+    return b.toString();
+  }
+
+  /// One self-contained prompt for planning a course with an assistant
+  /// outside the app; the answer is read by `parseOutline`. Its lessons are
+  /// then written one by one with [externalLesson].
+  static String externalOutline(String topic, {int? lessonCount}) =>
+      '${outlineSystem.replaceFirst(', no code fences, nothing before or after', '')}\n'
+      '- Put your whole answer in ONE code block, so that I can copy it '
+      'with its line structure. Write nothing before or after the code '
+      'block.\n\n'
+      '${outlineUser(topic, lessonCount: lessonCount)}';
+
+  // ------------------------------------------------------------------ recap
+
+  /// Script request for the short review lecture made a few days after a
+  /// lesson was listened to. Uses [narrationSystem] for the format.
+  static String recapUser({required String title, required String notesMarkdown}) =>
+      'The student listened to the lecture "${title.trim()}" a few days ago. '
+      'Write the script of a short review of it, about three minutes of '
+      'speech (350 to 500 words of SAY text), in 2 or 3 SECTIONs.\n\n'
+      'Its purpose is recall, not re-teaching. Go through the main '
+      'definitions and results in order, and for each one first ask the '
+      'listener to recall it ("What does it mean for a set to be compact?"), '
+      'then PAUSE: 5, then state it precisely and add the one idea that makes '
+      'it memorable or the key step of its proof. Introduce nothing that was '
+      'not in the lecture. Start with one sentence saying what is being '
+      'reviewed and finish with one sentence on how the pieces fit together; '
+      'no greeting, no goodbye.\n\n'
+      'Lecture notes of the original lesson (between the markers):\n'
+      '<<<NOTES\n${notesMarkdown.trim()}\nNOTES>>>\n\n'
+      'Now produce the script in the required SECTION/SAY/SHOW/PAUSE format only.';
 
   // ---------------------------------------------------------- transcription
 

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../player/mini_player.dart';
 import 'widgets.dart';
 
 class CourseScreen extends ConsumerWidget {
@@ -46,8 +48,13 @@ class CourseScreen extends ConsumerWidget {
         .where((l) =>
             l.stage == LessonStage.pending || l.stage == LessonStage.failed)
         .toList();
+    final unwritten = [
+      for (final l in remaining)
+        if (!l.hasNotes && !l.isBookChapter) l,
+    ];
 
     return Scaffold(
+      bottomNavigationBar: const MiniPlayerBar(),
       body: CustomScrollView(
         slivers: [
           SliverAppBar.large(title: Text(course.title)),
@@ -72,16 +79,24 @@ class CourseScreen extends ConsumerWidget {
                       borderRadius: BorderRadius.circular(2),
                     ),
                     const SizedBox(height: 16),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: FilledButton.tonalIcon(
+                    Wrap(spacing: 8, runSpacing: 8, children: [
+                      FilledButton.tonalIcon(
                         onPressed: remaining.isEmpty
                             ? null
                             : () => _generateAll(context, ref, remaining),
                         icon: const Icon(Icons.auto_awesome),
                         label: const Text('Generate all remaining'),
                       ),
-                    ),
+                      // The next lesson that is still to be written.
+                      if (unwritten.isNotEmpty)
+                        OutlinedButton.icon(
+                          onPressed: () => context.push(
+                              '/import-lesson?lesson=${unwritten.first.id}'),
+                          icon: const Icon(Icons.content_paste_go),
+                          label: Text('Write lesson '
+                              '${unwritten.first.order + 1} with your own AI'),
+                        ),
+                    ]),
                   ],
                 ),
               ),
@@ -120,9 +135,13 @@ class CourseScreen extends ConsumerWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Generate all remaining?'),
-        content: Text(
-            '$n ${n == 1 ? 'lesson' : 'lessons'} will be generated one after '
-            'another. This uses OpenRouter API credits.'),
+        content: Text(ref.read(settingsProvider).lessonBatch
+            ? '$n ${n == 1 ? 'lesson' : 'lessons'} will be sent to the batch '
+                'queue. They usually arrive within minutes, at most a day, '
+                'and you get a notification for each. This uses OpenRouter '
+                'API credits.'
+            : '$n ${n == 1 ? 'lesson' : 'lessons'} will be generated one '
+                'after another. This uses OpenRouter API credits.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),

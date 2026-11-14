@@ -1,14 +1,29 @@
 import 'package:learnmath/ai/narration_parser.dart';
 import 'package:learnmath/ai/openrouter_client.dart';
 import 'package:learnmath/ai/prompts.dart';
+import 'package:learnmath/checks/check_parser.dart';
+import 'package:learnmath/checks/math_check.dart';
+import 'package:learnmath/checks/proof_review.dart';
 import 'package:learnmath/core/models.dart';
 
-/// Turns topics into outlines, lecture notes and narration scripts.
+/// Lecture notes as the model wrote them, with their SymPy checks.
+class NotesDraft {
+  const NotesDraft({required this.notes, required this.checks});
+  final String notes;
+  final List<MathCheck> checks;
+}
+
+/// Builds the model requests for outlines, lecture notes and narration
+/// scripts and parses the answers. Requests and parsers are separate so the
+/// same lesson can be written immediately or through the Batch API.
 class LessonGenerator {
-  LessonGenerator(this.client, {required this.model});
+  LessonGenerator(this.client, {required this.model, this.effort});
 
   final OpenRouterClient client;
   final String model;
+
+  /// `reasoning.effort` for notes and scripts; null for the model default.
+  final String? effort;
 
   Future<CourseOutline> generateOutline(String topic, {int? lessonCount}) async {
     final raw = await client.chat(
@@ -22,41 +37,94 @@ class LessonGenerator {
     return parseOutline(raw);
   }
 
-  Future<String> generateNotes({
+  static const notesTemperature = 0.5;
+  static const narrationTemperature = 0.6;
+
+  /// Refereeing and judging want the same answer every time.
+  static const reviewTemperature = 0.2;
+
+  static List<ChatMessage> notesMessages({
     required String title,
     required String brief,
     CourseContext? course,
-    void Function(int chars)? onProgress,
-  }) async {
-    final raw = await client.chat(
-      model: model,
-      temperature: 0.5,
-      messages: [
-        const ChatMessage.system(Prompts.notesSystem),
+    bool withChecks = false,
+  }) =>
+      [
+        ChatMessage.system(_notesSystem(withChecks)),
         ChatMessage.user(
             Prompts.notesUser(title: title, brief: brief, course: course)),
-      ],
-      onProgress: onProgress,
-    );
-    final notes = cleanNotes(raw);
-    if (notes.isEmpty) {
-      throw const FormatException('The model returned empty lecture notes.');
-    }
-    return notes;
-  }
+      ];
 
-  Future<List<NarrationSegment>> generateNarration({
+  /// Asks for one targeted rewrite of notes whose checks failed.
+  static List<ChatMessage> repairMessages({
+    required String title,
+    required String notesMarkdown,
+    required List<MathCheck> checks,
+    required List<CheckOutcome> outcomes,
+  }) =>
+      [
+        ChatMessage.system(_notesSystem(true)),
+        ChatMessage.user(Prompts.repairUser(
+          title: title,
+          notesMarkdown: notesMarkdown,
+          checksBlock: formatChecks(checks),
+          failures: formatFailures(checks, outcomes),
+        )),
+      ];
+
+  static List<ChatMessage> verifyMessages({
+    required String title,
+    required String notesMarkdown,
+  }) =>
+      [
+        const ChatMessage.system(Prompts.verifySystem),
+        ChatMessage.user(
+            Prompts.verifyUser(title: title, notesMarkdown: notesMarkdown)),
+      ];
+
+  /// Has the lesson model judge which of the reviewer's [issues] are real.
+  static List<ChatMessage> judgeMessages({
+    required String title,
+    required String notesMarkdown,
+    required List<ProofIssue> issues,
+  }) =>
+      [
+        const ChatMessage.system(Prompts.judgeSystem),
+        ChatMessage.user(Prompts.judgeUser(
+          title: title,
+          notesMarkdown: notesMarkdown,
+          issues: formatIssues(issues),
+        )),
+      ];
+
+  static List<ChatMessage> proofRepairMessages({
+    required String title,
+    required String notesMarkdown,
+    required List<ProofIssue> issues,
+    bool withChecks = false,
+  }) =>
+      [
+        ChatMessage.system(_notesSystem(withChecks)),
+        ChatMessage.user(Prompts.proofRepairUser(
+          title: title,
+          notesMarkdown: notesMarkdown,
+          issues: formatIssues(issues),
+        )),
+      ];
+
+  static String _notesSystem(bool withChecks) => withChecks
+      ? Prompts.notesSystem + Prompts.checksAddendum
+      : Prompts.notesSystem;
+
+  static List<ChatMessage> narrationMessages({
     required String title,
     required String notesMarkdown,
     CourseContext? course,
     bool fromBook = false,
     NarrationPart? part,
-    void Function(int chars)? onProgress,
-  }) async {
-    final raw = await client.chat(
-      model: model,
-      temperature: 0.6,
-      messages: [
+    bool recall = false,
+  }) =>
+      [
         const ChatMessage.system(Prompts.narrationSystem),
         ChatMessage.user(Prompts.narrationUser(
           title: title,
@@ -64,10 +132,31 @@ class LessonGenerator {
           course: course,
           fromBook: fromBook,
           part: part,
+          recall: recall,
         )),
-      ],
-      onProgress: onProgress,
-    );
+      ];
+
+  /// Script of the short review lecture of a lesson listened to earlier.
+  static List<ChatMessage> recapMessages({
+    required String title,
+    required String notesMarkdown,
+  }) =>
+      [
+        const ChatMessage.system(Prompts.narrationSystem),
+        ChatMessage.user(
+            Prompts.recapUser(title: title, notesMarkdown: notesMarkdown)),
+      ];
+
+  static NotesDraft parseNotes(String raw) {
+    final split = splitNotesAndChecks(raw);
+    final notes = cleanNotes(split.notes);
+    if (notes.isEmpty) {
+      throw const FormatException('The model returned empty lecture notes.');
+    }
+    return NotesDraft(notes: notes, checks: split.checks);
+  }
+
+  static List<NarrationSegment> parseScript(String raw) {
     final segments = parseNarration(raw);
     if (segments.length < 3) {
       throw const FormatException(
@@ -75,4 +164,22 @@ class LessonGenerator {
     }
     return segments;
   }
+
+  /// Sends one notes or script request and waits for the full answer.
+  /// [model] and [effort] override the lesson model for this request (the
+  /// proof reviewer is a different model).
+  Future<String> ask(
+    List<ChatMessage> messages, {
+    required double temperature,
+    String? model,
+    String? effort,
+    void Function(int chars)? onProgress,
+  }) =>
+      client.chat(
+        model: model ?? this.model,
+        temperature: temperature,
+        reasoningEffort: model == null ? this.effort : effort,
+        messages: messages,
+        onProgress: onProgress,
+      );
 }

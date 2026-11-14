@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../pipeline/generation_service.dart';
 
 /// "1:02:03" or "12:34".
 String formatDuration(Duration d) {
@@ -40,14 +41,31 @@ Future<bool> confirmDelete(BuildContext context, {required String what}) async {
 
 /// Starts generation for [lessonId], or points the user to settings when no
 /// API key is configured.
+/// Whether [lesson] is a planned or failed lesson with nothing written yet,
+/// which an assistant outside the app can write.
+bool canWriteOutside(Lesson lesson) =>
+    (lesson.stage == LessonStage.pending ||
+        lesson.stage == LessonStage.failed) &&
+    !lesson.hasNotes &&
+    !lesson.isBookChapter &&
+    !lesson.isRecap;
+
 void generateLesson(BuildContext context, WidgetRef ref, String lessonId,
-    {bool? audio}) {
+    {bool? audio, Lesson? lesson}) {
   final settings = ref.read(settingsProvider);
   // Reading a book chapter with Mathpix is the one job that needs no key;
   // the pipeline reports a missing key itself in that mode.
   final mathpix =
       settings.transcriptionBackend == TranscriptionBackend.mathpix;
-  if (!settings.hasApiKey && !mathpix) {
+  // Nor does recording a lesson that already has its script.
+  final onDevice =
+      lesson != null && GenerationService.runsOnDevice(lesson, settings);
+  if (!settings.hasApiKey && !mathpix && !onDevice) {
+    // A planned lesson can still be written by the student's own assistant.
+    if (lesson != null && canWriteOutside(lesson)) {
+      GoRouter.of(context).push('/import-lesson?lesson=$lessonId');
+      return;
+    }
     final messenger = ScaffoldMessenger.of(context);
     final router = GoRouter.of(context);
     messenger.hideCurrentSnackBar();
@@ -74,7 +92,9 @@ class LessonTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
-    final progress = ref.watch(jobProgressProvider)[lesson.id];
+    // Only this lesson's progress: a recording ticks once per sentence.
+    final progress =
+        ref.watch(jobProgressProvider.select((m) => m[lesson.id]));
     final generation = ref.read(generationProvider);
     final working = lesson.stage.isWorking || progress != null;
 
@@ -87,7 +107,8 @@ class LessonTile extends ConsumerWidget {
     VoidCallback onTap = () => context.push('/lesson/${lesson.id}');
 
     if (working) {
-      subtitle = progress?.label ?? 'Working…';
+      subtitle = progress?.label ??
+          (lesson.isWaitingForBatch ? 'Waiting for the batch answer…' : 'Working…');
       trailing = IconButton(
         tooltip: 'Cancel generation',
         icon: const Icon(Icons.close),
@@ -105,7 +126,8 @@ class LessonTile extends ConsumerWidget {
       trailing = IconButton(
         tooltip: 'Retry',
         icon: const Icon(Icons.refresh),
-        onPressed: () => generateLesson(context, ref, lesson.id),
+        onPressed: () =>
+            generateLesson(context, ref, lesson.id, lesson: lesson),
       );
     } else if (lesson.stage == LessonStage.pending) {
       subtitle = lesson.brief.isEmpty ? 'Not generated yet' : lesson.brief;
@@ -115,16 +137,20 @@ class LessonTile extends ConsumerWidget {
         icon: Icon(lesson.isBookChapter
             ? Icons.document_scanner_outlined
             : Icons.auto_awesome),
-        onPressed: () => generateLesson(context, ref, lesson.id),
+        onPressed: () =>
+            generateLesson(context, ref, lesson.id, lesson: lesson),
       );
       // A book chapter can already be opened: its pages are in the PDF tab.
       if (!lesson.isBookChapter) {
-        onTap = () => generateLesson(context, ref, lesson.id);
+        onTap = () => generateLesson(context, ref, lesson.id, lesson: lesson);
       }
     } else {
       final ms = lesson.audioDurationMs;
       final mins = ms == null ? null : (ms / 60000).ceil();
       subtitle = mins == null ? 'Ready to read and ask' : '$mins min';
+      // The voice model of the recording ("Piper Lessac").
+      final voice = lesson.voice?.split(' · ').first;
+      if (mins != null && voice != null) subtitle = '$subtitle · $voice';
       if (!lesson.hasAudio) {
         trailing = Icon(Icons.menu_book_outlined, color: scheme.onSurfaceVariant);
       } else if (lesson.completed) {
@@ -227,6 +253,37 @@ class AdaptiveCards extends StatelessWidget {
       );
     });
   }
+}
+
+/// [padding] widened at the sides so that content in a scroll view spanning
+/// [width] sits centred in a column of at most [maxWidth].
+EdgeInsets centredPadding(double width, EdgeInsets padding, double maxWidth) {
+  final side = (width - maxWidth) / 2;
+  return side <= 0 ? padding : padding + EdgeInsets.symmetric(horizontal: side);
+}
+
+/// A [ListView] as wide as its parent, with its content centred in a column
+/// of at most [maxWidth]. Unlike a list inside [ContentWidth], the empty
+/// margins of a wide screen scroll it too.
+class CentredListView extends StatelessWidget {
+  const CentredListView({
+    super.key,
+    required this.children,
+    this.padding = EdgeInsets.zero,
+    this.maxWidth = kMaxContentWidth,
+  });
+
+  final List<Widget> children;
+  final EdgeInsets padding;
+  final double maxWidth;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+        builder: (context, c) => ListView(
+          padding: centredPadding(c.maxWidth, padding, maxWidth),
+          children: children,
+        ),
+      );
 }
 
 /// Centres [child] with a max width, with horizontal padding.

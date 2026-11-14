@@ -1,9 +1,14 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sembast/sembast.dart';
 
+import '../checks/math_check.dart';
+import '../checks/pyodide_runner.dart';
+import '../notify/notifications.dart';
 import '../pipeline/generation_service.dart';
 import '../player/lecture_player.dart';
-import '../tts/kokoro_engine.dart';
+import '../tts/on_device_tts.dart';
 import 'models.dart';
 import 'storage.dart';
 
@@ -49,8 +54,24 @@ class SettingsNotifier extends Notifier<AppSettings> {
 final settingsProvider =
     NotifierProvider<SettingsNotifier, AppSettings>(SettingsNotifier.new);
 
-final kokoroModelProvider = Provider<KokoroModelManager>(
-    (ref) => KokoroModelManager(ref.watch(appPathsProvider).modelsDir));
+final voiceModelsProvider = Provider<VoiceModelManager>(
+    (ref) => VoiceModelManager(ref.watch(appPathsProvider).modelsDir));
+
+/// Overridden in `main()` with the plugin-backed implementations.
+final notificationsProvider =
+    Provider<AppNotifications>((ref) => const NoNotifications());
+
+final batchBackgroundProvider =
+    Provider<BatchBackground>((ref) => const NoBatchBackground());
+
+final keepAliveProvider =
+    Provider<KeepAlive>((ref) => const NoKeepAlive());
+
+/// SymPy runs in a hidden WebView, which only the mobile platforms have.
+final checkRunnerFactoryProvider = Provider<MathCheckRunner Function()?>(
+    (ref) => Platform.isAndroid || Platform.isIOS
+        ? PyodideCheckRunner.new
+        : null);
 
 /// Live progress per lesson id while generation jobs run.
 class JobProgressNotifier extends Notifier<Map<String, JobProgress>> {
@@ -77,8 +98,12 @@ final generationProvider = Provider<GenerationService>((ref) {
     repo: ref.watch(repositoryProvider),
     paths: ref.watch(appPathsProvider),
     readSettings: () => ref.read(settingsProvider),
-    kokoro: ref.watch(kokoroModelProvider),
+    voices: ref.watch(voiceModelsProvider),
     onProgress: (id, p) => ref.read(jobProgressProvider.notifier).set(id, p),
+    notifications: ref.watch(notificationsProvider),
+    batchBackground: ref.watch(batchBackgroundProvider),
+    keepAlive: ref.watch(keepAliveProvider),
+    createCheckRunner: ref.watch(checkRunnerFactoryProvider),
   );
 });
 
@@ -100,7 +125,11 @@ final lessonProvider = StreamProvider.family<Lesson?, String>(
 
 /// One player for the whole app so audio keeps going across screens.
 final lecturePlayerProvider = Provider<LecturePlayer>((ref) {
-  final player = LecturePlayer(ref.watch(repositoryProvider));
+  final player = LecturePlayer(
+    ref.watch(repositoryProvider),
+    autoPlayNext: () => ref.read(settingsProvider).autoPlayNext,
+    speed: () => ref.read(settingsProvider).playbackSpeed,
+  );
   ref.onDispose(player.dispose);
   return player;
 });

@@ -1,5 +1,6 @@
-// Integration test for on-device speech. Needs the extracted Kokoro model:
-//   KOKORO_MODELS_DIR=<dir containing kokoro-int8-en-v0_19/> \
+// Integration test for on-device speech. Needs an extracted voice model:
+//   KOKORO_MODELS_DIR=<dir containing the model's folder, e.g.
+//     kokoro-int8-en-v0_19/> VOICE_MODEL=<kokoro|kitten-nano|piper-lessac> \
 //   LD_LIBRARY_PATH=~/.pub-cache/hosted/pub.dev/sherpa_onnx_linux-<ver>/linux/x64 \
 //   flutter test test/tts
 @TestOn('vm')
@@ -9,16 +10,19 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:learnmath/core/models.dart';
-import 'package:learnmath/tts/kokoro_engine.dart';
 import 'package:learnmath/tts/lecture_audio_builder.dart';
+import 'package:learnmath/tts/on_device_tts.dart';
 
 void main() {
   final modelsDir = Platform.environment['KOKORO_MODELS_DIR'];
+  final modelId = Platform.environment['VOICE_MODEL'] ?? 'kokoro';
 
-  test('Kokoro synthesizes a paced lecture with exact timings', () async {
+  test('$modelId synthesizes a paced lecture with exact timings', () async {
     final out = '${Directory.systemTemp.createTempSync().path}/lecture.wav';
-    final engine = KokoroTtsEngine(
-        manager: KokoroModelManager(modelsDir!), speakerId: 5);
+    final engine = OnDeviceTtsEngine(
+        manager: VoiceModelManager(modelsDir!),
+        model: VoiceModel.byId(modelId),
+        speakerId: 5);
     const script = [
       NarrationSegment(
           say: 'Let us start with a question.', section: 'Intro', pauseMs: 3000),

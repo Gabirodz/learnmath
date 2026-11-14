@@ -1,0 +1,168 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Checks are untrusted Python. The policy is inherited by the Blob worker
+     they run in, so they can reach nothing but the Pyodide CDN. Keep the host
+     in step with pyodideBaseUrl in lib/checks/pyodide_runner.dart. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net; worker-src blob:; connect-src https://cdn.jsdelivr.net">
+<title>mathcheck</title>
+<script>
+/*
+ * Runs model-written SymPy checks with Pyodide inside a Web Worker.
+ *
+ *   window.mathcheck.run({pyodideUrl, harness, checks: [{code}], timeoutMs})
+ *     -> Promise<string>  JSON array, one {status, detail} per check, in order,
+ *        status being "passed" | "failed" | "error" | "timeout".
+ *   window.mathcheckProgress(done, total)   optional, defined by the host.
+ *
+ * Sandbox boundary: checks are untrusted Python. They get exactly what a Web
+ * Worker has: no DOM, no access to this page's JS objects, no host bridge (the
+ * flutter_inappwebview handlers live on the page, not in the worker). The
+ * Content-Security-Policy above limits their network access to the Pyodide
+ * CDN. They can burn CPU; that is bounded by terminating the worker on
+ * timeout. Pyodide's virtual file
+ * system is in-memory and dies with the worker. The page only runs on a blank
+ * origin with nothing to steal; do not load other content into this WebView.
+ *
+ * The worker is created from a Blob URL so this stays a single file. It must
+ * be a module worker: with Pyodide 314.0.7, importScripts('pyodide.js') in a
+ * classic worker fails in Chromium ("failed to load", verified), while
+ * import('.../pyodide.mjs') works. indexURL is passed explicitly because a
+ * Blob worker has no useful location to derive it from.
+ */
+(function () {
+  'use strict';
+
+  var LOAD_TIMEOUT_MS = 120000;
+
+  var WORKER_SOURCE = [
+    "var py = null, runCheck = null;",
+    "self.onmessage = async function (e) {",
+    "  var m = e.data;",
+    "  try {",
+    "    if (m.type === 'init') {",
+    "      var mod = await import(m.pyodideUrl + 'pyodide.mjs');",
+    "      py = await mod.loadPyodide({indexURL: m.pyodideUrl});",
+    "      await py.loadPackage('sympy');",
+    "      await py.runPythonAsync(m.harness);",
+    "      // Import SymPy now so that its import time is not charged to check 1.",
+    "      await py.runPythonAsync('exec(\"from sympy import *\", {})');",
+    "      runCheck = py.globals.get('run_check');",
+    "      self.postMessage({type: 'ready'});",
+    "    } else if (m.type === 'check') {",
+    "      var out = runCheck(m.code);",
+    "      self.postMessage({type: 'result', id: m.id, json: String(out)});",
+    "    }",
+    "  } catch (err) {",
+    "    var text = String(err && err.message || err);",
+    "    if (m.type === 'init') self.postMessage({type: 'loadError', message: text});",
+    "    else self.postMessage({type: 'result', id: m.id, json: JSON.stringify({status: 'error', detail: text.slice(-600)})});",
+    "  }",
+    "};"
+  ].join('\n');
+
+  var blobUrl = null;
+  var worker = null;      // current Worker, or null
+  var workerKey = null;   // pyodideUrl + harness the worker was initialised with
+  var ready = null;       // Promise resolving when worker is initialised
+  var busy = Promise.resolve();  // serialises run() calls
+
+  function killWorker() {
+    if (worker) { worker.terminate(); }
+    worker = null; workerKey = null; ready = null;
+  }
+
+  function startWorker(pyodideUrl, harness) {
+    if (!blobUrl) {
+      blobUrl = URL.createObjectURL(new Blob([WORKER_SOURCE], {type: 'text/javascript'}));
+    }
+    var w = new Worker(blobUrl, {type: 'module'});
+    worker = w;
+    workerKey = pyodideUrl + '\u0000' + harness;
+    ready = new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        reject(new Error('Loading Pyodide and SymPy timed out after ' +
+          (LOAD_TIMEOUT_MS / 1000) + ' s. Check the network connection.'));
+      }, LOAD_TIMEOUT_MS);
+      w.onmessage = function (e) {
+        if (e.data.type === 'ready') { clearTimeout(timer); resolve(); }
+        else if (e.data.type === 'loadError') {
+          clearTimeout(timer);
+          reject(new Error('Could not load Pyodide/SymPy from ' + pyodideUrl + ': ' + e.data.message));
+        }
+      };
+      w.onerror = function (e) {
+        clearTimeout(timer);
+        reject(new Error('Worker failed to start: ' + (e && e.message || 'unknown error')));
+      };
+      w.postMessage({type: 'init', pyodideUrl: pyodideUrl, harness: harness});
+    });
+    // A failed load leaves nothing reusable behind.
+    ready.catch(function () { if (worker === w) killWorker(); else w.terminate(); });
+    return ready;
+  }
+
+  function ensureWorker(pyodideUrl, harness) {
+    var key = pyodideUrl + '\u0000' + harness;
+    if (worker && workerKey === key) return ready;
+    killWorker();
+    return startWorker(pyodideUrl, harness);
+  }
+
+  var nextId = 1;
+
+  // Resolves with {status, detail}; on timeout terminates the worker.
+  function runOne(code, timeoutMs) {
+    var w = worker, id = nextId++;
+    return new Promise(function (resolve) {
+      var timer = setTimeout(function () {
+        killWorker();
+        resolve({status: 'timeout', detail: 'Stopped after ' + (timeoutMs / 1000) + ' s.'});
+      }, timeoutMs);
+      function finish(v) { clearTimeout(timer); resolve(v); }
+      w.onmessage = function (e) {
+        if (e.data.type !== 'result' || e.data.id !== id) return;
+        var v;
+        try { v = JSON.parse(e.data.json); }
+        catch (_) { v = {status: 'error', detail: 'Unreadable result: ' + String(e.data.json).slice(0, 200)}; }
+        finish({status: v.status || 'error', detail: v.detail || ''});
+      };
+      w.onerror = function (e) {
+        killWorker();
+        finish({status: 'error', detail: 'Worker crashed: ' + (e && e.message || 'unknown error')});
+      };
+      w.postMessage({type: 'check', id: id, code: code});
+    });
+  }
+
+  async function doRun(request) {
+    var checks = request.checks || [];
+    var timeoutMs = request.timeoutMs > 0 ? request.timeoutMs : 20000;
+    var results = [];
+    for (var i = 0; i < checks.length; i++) {
+      // After a timeout the worker is gone; this starts a fresh one (reloading
+      // SymPy, whose load time is not charged to the check).
+      await ensureWorker(request.pyodideUrl, request.harness);
+      results.push(await runOne(String(checks[i].code), timeoutMs));
+      if (typeof window.mathcheckProgress === 'function') {
+        try { window.mathcheckProgress(i + 1, checks.length); } catch (_) {}
+      }
+    }
+    return JSON.stringify(results);
+  }
+
+  window.mathcheck = {
+    run: function (request) {
+      var p = busy.then(function () { return doRun(request); });
+      busy = p.catch(function () {});
+      return p;
+    },
+    ready: true
+  };
+})();
+</script>
+</head>
+<body></body>
+</html>

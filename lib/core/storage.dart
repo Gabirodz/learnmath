@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sembast/sembast_io.dart';
 
+import '../quiz/quiz_store.dart';
 import 'models.dart';
 
 /// Filesystem layout:
@@ -48,6 +49,25 @@ class LibraryRepository {
 
   /// Chat threads, keyed by lesson id (see `lib/chat`).
   final _chats = stringMapStoreFactory.store('chats');
+
+  /// Playback position checkpoints in ms, keyed by lesson id.
+  final _positions = StoreRef<String, int>('positions');
+
+  /// Remembers where a lecture is being listened to. Written every few
+  /// seconds during playback, so it is kept out of the lesson record: that
+  /// one holds the notes and the script, and every write to it re-reads the
+  /// library and rebuilds the screens showing it.
+  Future<void> checkpointPosition(String lessonId, int ms) =>
+      _positions.record(lessonId).put(_db, ms);
+
+  /// The checkpoint left by playback that did not end with a pause (the app
+  /// was killed), or null.
+  Future<int?> positionCheckpoint(String lessonId) =>
+      _positions.record(lessonId).get(_db);
+
+  Future<void> clearPositionCheckpoint(String lessonId) async {
+    await _positions.record(lessonId).delete(_db);
+  }
 
   Stream<List<Course>> watchCourses() => _courses
       .query(finder: Finder(sortOrders: [SortOrder('createdAt', false)]))
@@ -128,6 +148,8 @@ class LibraryRepository {
   Future<void> deleteLesson(String id) async {
     await _lessons.record(id).delete(_db);
     await _chats.record(id).delete(_db);
+    await _positions.record(id).delete(_db);
+    await QuizStore.store.record(id).delete(_db);
     await _deleteDir(_paths.lessonDir(id));
   }
 
@@ -138,6 +160,8 @@ class LibraryRepository {
       await _lessons.delete(txn,
           finder: Finder(filter: Filter.equals('courseId', id)));
       await _chats.records([for (final l in lessons) l.id]).delete(txn);
+      await _positions.records([for (final l in lessons) l.id]).delete(txn);
+      await QuizStore.store.records([for (final l in lessons) l.id]).delete(txn);
     });
     for (final l in lessons) {
       await _deleteDir(_paths.lessonDir(l.id));

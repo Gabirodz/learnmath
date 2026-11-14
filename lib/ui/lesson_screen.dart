@@ -6,12 +6,17 @@ import 'package:go_router/go_router.dart';
 
 import '../chat/chat_controller.dart';
 import '../chat/chat_pane.dart';
+import '../checks/check_banner.dart';
+import '../checks/review_banner.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../exercises/exercise_parser.dart';
+import '../exercises/exercises_sheet.dart';
 import '../notes/notes_view.dart';
 import '../notes/pdf_exporter.dart';
 import '../notes/pdf_view.dart';
 import '../player/player_view.dart';
+import '../quiz/quiz_pane.dart';
 import 'widgets.dart';
 
 /// One lesson: Listen / Notes / PDF / Chat. Phones get four tabs; wide screens
@@ -58,17 +63,39 @@ class LessonScreen extends ConsumerWidget {
         ? _BookPane(lesson: lesson)
         : _PdfPane(lessonId: lessonId);
     final chat = ChatPane(lessonId: lessonId);
+    final quiz = QuizPane(lessonId: lessonId);
 
+    final jobRunning =
+        ref.watch(jobProgressProvider.select((m) => m[lessonId] != null));
     final actions = [
       PopupMenuButton<String>(
         onSelected: (v) {
           if (v == 'rerecord') ref.read(generationProvider).rerecord(lessonId);
+          if (v == 'verify') _confirmVerify(context, ref);
         },
         itemBuilder: (_) => [
           PopupMenuItem(
             value: 'rerecord',
             enabled: lesson.stage == LessonStage.ready && lesson.hasAudio,
-            child: const Text('Re-record with current voice settings'),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Re-record with current voice settings'),
+                // Which voice this recording has, to compare with Settings.
+                if (lesson.hasAudio && lesson.voice != null)
+                  Text('Recorded with ${lesson.voice}',
+                      style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ),
+          ),
+          PopupMenuItem(
+            value: 'verify',
+            enabled: lesson.stage == LessonStage.ready &&
+                lesson.hasNotes &&
+                !lesson.isBookChapter &&
+                !jobRunning,
+            child: const Text('Verify proofs with a second model'),
           ),
         ],
       ),
@@ -76,7 +103,7 @@ class LessonScreen extends ConsumerWidget {
 
     if (wide) {
       return DefaultTabController(
-        length: 3,
+        length: 4,
         child: Scaffold(
           appBar: AppBar(title: Text(lesson.title), actions: actions),
           body: Row(
@@ -91,11 +118,12 @@ class LessonScreen extends ConsumerWidget {
                       const Tab(text: 'Notes'),
                       Tab(text: pdfLabel),
                       const Tab(text: 'Chat'),
+                      const Tab(text: 'Quiz'),
                     ]),
                     Expanded(
                       child: TabBarView(
                         physics: const NeverScrollableScrollPhysics(),
-                        children: [notes, pdf, chat],
+                        children: [notes, pdf, chat, quiz],
                       ),
                     ),
                   ],
@@ -107,7 +135,7 @@ class LessonScreen extends ConsumerWidget {
       );
     }
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         appBar: AppBar(
           title: Text(lesson.title),
@@ -117,16 +145,41 @@ class LessonScreen extends ConsumerWidget {
             const Tab(text: 'Notes'),
             Tab(text: pdfLabel),
             const Tab(text: 'Chat'),
+            const Tab(text: 'Quiz'),
           ]),
         ),
         // Horizontal swipes belong to the player's double-tap surface and to
         // wide formulas, so tabs switch by tapping only.
         body: TabBarView(
           physics: const NeverScrollableScrollPhysics(),
-          children: [listen, notes, pdf, chat],
+          children: [listen, notes, pdf, chat, quiz],
         ),
       ),
     );
+  }
+}
+
+extension on LessonScreen {
+  Future<void> _confirmVerify(BuildContext context, WidgetRef ref) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Verify proofs with a second model'),
+        content: const Text(
+            'A second model reads the proofs and reports possible errors. '
+            'This costs several times what writing the lesson did. The notes '
+            'and the recording are not changed.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Verify')),
+        ],
+      ),
+    );
+    if (ok == true) await ref.read(generationProvider).verify(lessonId);
   }
 }
 
@@ -160,10 +213,16 @@ class _ListenPane extends ConsumerWidget {
               style: theme.textTheme.titleMedium, textAlign: TextAlign.center),
           const SizedBox(height: 8),
           Text(
-            lesson.hasNotes
-                ? 'The notes are ready to read while the lecture is recorded. '
-                    'Keep the app open.'
-                : 'This takes a few minutes. Keep the app open.',
+            lesson.isWaitingForBatch
+                ? 'This lesson is in the batch queue, at about half the price. '
+                    'The answer usually arrives within minutes, at most a day. '
+                    'You can leave the app: LearnMath notifies you when it '
+                    'is here.'
+                : lesson.hasNotes
+                    ? 'The notes are ready to read while the lecture is '
+                        'recorded. You can leave the app; a notification '
+                        'shows the progress.'
+                    : 'This takes a few minutes. Keep the app open.',
             style: theme.textTheme.bodyMedium!
                 .copyWith(color: theme.colorScheme.onSurfaceVariant),
             textAlign: TextAlign.center,
@@ -197,6 +256,12 @@ class _ListenPane extends ConsumerWidget {
                 onPressed: () => context.push('/settings'),
                 child: const Text('Settings'),
               ),
+              if (canWriteOutside(lesson))
+                OutlinedButton(
+                  onPressed: () =>
+                      context.push('/import-lesson?lesson=${lesson.id}'),
+                  child: const Text('Write it with your own AI'),
+                ),
             ],
           ),
         ],
@@ -251,10 +316,19 @@ class _ListenPane extends ConsumerWidget {
           Text(lesson.brief, textAlign: TextAlign.center),
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: () => generateLesson(context, ref, lesson.id),
+            onPressed: () =>
+                generateLesson(context, ref, lesson.id, lesson: lesson),
             icon: const Icon(Icons.auto_awesome),
             label: const Text('Generate lesson'),
           ),
+          if (canWriteOutside(lesson)) ...[
+            const SizedBox(height: 8),
+            OutlinedButton(
+              onPressed: () =>
+                  context.push('/import-lesson?lesson=${lesson.id}'),
+              child: const Text('Write it with your own AI'),
+            ),
+          ],
         ],
       );
     }
@@ -274,13 +348,61 @@ class _NotesPane extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Select only the text so position saves don't re-render the notes.
-    final markdown = ref.watch(
-        lessonProvider(lessonId).select((a) => a.value?.notesMarkdown));
+    // Select only what is shown so position saves don't re-render the notes.
+    final (markdown, checks, report, idle, review) = ref.watch(
+        lessonProvider(lessonId).select((a) => (
+              a.value?.notesMarkdown,
+              a.value?.checks,
+              a.value?.checkReport,
+              a.value?.stage == LessonStage.ready,
+              a.value?.review,
+            )));
     if (markdown == null || markdown.isEmpty) {
       return const _Placeholder('The text appears here once it is ready.');
     }
-    return NotesView(markdown: markdown, onAskAbout: onAsk);
+    final busy =
+        ref.watch(jobProgressProvider.select((m) => m[lessonId] != null));
+    final canCheck = ref.watch(checkRunnerFactoryProvider) != null;
+    final exerciseCount = parseExercises(markdown).length;
+    return Column(
+      children: [
+        CheckBanner(
+          checks: checks ?? const [],
+          report: report,
+          onCheckNow: canCheck && idle && !busy
+              ? () => ref.read(generationProvider).recheck(lessonId)
+              : null,
+        ),
+        ReviewBanner(review: review),
+        Expanded(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: NotesView(
+                  markdown: markdown,
+                  onAskAbout: onAsk,
+                  // Room for the button below the last line of the notes.
+                  padding: exerciseCount > 0
+                      ? const EdgeInsets.fromLTRB(16, 12, 16, 96)
+                      : null,
+                ),
+              ),
+              if (exerciseCount > 0)
+                Positioned(
+                  right: 16,
+                  bottom: 16,
+                  child: FloatingActionButton.extended(
+                    heroTag: 'exercises-$lessonId',
+                    onPressed: () => showExercisesSheet(context, lessonId),
+                    icon: const Icon(Icons.edit_note),
+                    label: Text('Exercises ($exerciseCount)'),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }
 

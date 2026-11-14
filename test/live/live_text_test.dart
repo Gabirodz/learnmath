@@ -39,12 +39,22 @@ void main() {
     });
 
     test('lecture notes', () async {
-      notes = await gen.generateNotes(
-        title: 'The Banach fixed-point theorem',
-        brief: 'Contractions on complete metric spaces, statement and proof, '
-            'one application.',
+      final raw = await gen.ask(
+        LessonGenerator.notesMessages(
+          title: 'The Banach fixed-point theorem',
+          brief: 'Contractions on complete metric spaces, statement and '
+              'proof, one application.',
+          withChecks: true,
+        ),
+        temperature: LessonGenerator.notesTemperature,
       );
+      final draft = LessonGenerator.parseNotes(raw);
+      notes = draft.notes;
       save('notes.md', notes);
+      save('checks.txt',
+          draft.checks.map((c) => 'CHECK: ${c.title}\n${c.code}').join('\n'));
+      expect(draft.checks, isNotEmpty, reason: 'at least one parsed check');
+      expect(notes, isNot(contains('<<<CHECKS')));
       expect(notes, startsWith('# '));
       expect(notes, contains(r'$'));
       expect(notes.contains(r'\(') || notes.contains(r'\['), isFalse);
@@ -52,8 +62,12 @@ void main() {
     });
 
     test('narration script', () async {
-      final segs = await gen.generateNarration(
-          title: 'The Banach fixed-point theorem', notesMarkdown: notes);
+      final rawScript = await gen.ask(
+        LessonGenerator.narrationMessages(
+            title: 'The Banach fixed-point theorem', notesMarkdown: notes),
+        temperature: LessonGenerator.narrationTemperature,
+      );
+      final segs = LessonGenerator.parseScript(rawScript);
       save(
           'narration.txt',
           segs

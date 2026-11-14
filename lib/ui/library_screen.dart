@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../player/mini_player.dart';
 import 'create_sheet.dart';
 import 'widgets.dart';
 
@@ -98,6 +99,7 @@ class LibraryScreen extends ConsumerWidget {
         ],
       ),
       body: SafeArea(child: body),
+      bottomNavigationBar: const MiniPlayerBar(),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => showCreateSheet(context),
         icon: const Icon(Icons.add),

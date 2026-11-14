@@ -224,7 +224,8 @@ class _BookImportScreenState extends ConsumerState<BookImportScreen> {
         Text('Reading the table of contents…'),
       ]));
     } else if (!loaded) {
-      body = ListView(padding: const EdgeInsets.all(16), children: [
+      body = CentredListView(
+          maxWidth: 800, padding: const EdgeInsets.all(16), children: [
         const SizedBox(height: 24),
         Icon(Icons.menu_book_outlined, size: 64, color: cs.primary),
         const SizedBox(height: 16),
@@ -260,7 +261,8 @@ class _BookImportScreenState extends ConsumerState<BookImportScreen> {
       ]);
     } else {
       final hasKey = ref.watch(settingsProvider).hasApiKey;
-      body = ListView(padding: const EdgeInsets.all(16), children: [
+      body = CentredListView(
+          maxWidth: 800, padding: const EdgeInsets.all(16), children: [
         TextField(
           controller: _titleCtrl,
           enabled: !busy,
@@ -344,7 +346,7 @@ class _BookImportScreenState extends ConsumerState<BookImportScreen> {
       appBar: AppBar(title: const Text('Import a book')),
       body: SafeArea(
         child: Column(children: [
-          Expanded(child: ContentWidth(maxWidth: 800, child: body)),
+          Expanded(child: body),
           if (loaded)
             Material(
               elevation: 3,

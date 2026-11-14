@@ -4,7 +4,12 @@ import 'package:flutter_math_fork/flutter_math.dart';
 /// Subtitle line: plain text with inline `$...$` LaTeX rendered as math.
 /// Wraps like normal text; formulas that fail to parse show as raw TeX.
 class SubtitleText extends StatelessWidget {
-  const SubtitleText(this.text, {super.key, required this.style, this.maxLines});
+  const SubtitleText(
+    this.text, {
+    super.key,
+    required this.style,
+    this.maxLines,
+  });
 
   final String text;
   final TextStyle style;
@@ -21,16 +26,18 @@ class SubtitleText extends StatelessWidget {
         spans.add(TextSpan(text: text.substring(last, m.start)));
       }
       final tex = m.group(1)!.trim();
-      spans.add(WidgetSpan(
-        alignment: PlaceholderAlignment.baseline,
-        baseline: TextBaseline.alphabetic,
-        child: Math.tex(
-          tex,
-          mathStyle: MathStyle.text,
-          textStyle: style,
-          onErrorFallback: (_) => Text(tex, style: style),
+      spans.add(
+        WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: Math.tex(
+            tex,
+            mathStyle: MathStyle.text,
+            textStyle: style,
+            onErrorFallback: (_) => Text(tex, style: style),
+          ),
         ),
-      ));
+      );
       last = m.end;
     }
     if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
