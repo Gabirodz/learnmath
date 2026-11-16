@@ -49,3 +49,10 @@ app.*.map.json
 
 # Local secrets
 testkey.txt
+
+# Notes for working sessions on the development machine (local paths and
+# addresses); not part of the project.
+HANDOFF.md
+
+# Gradle reports
+/android/build/

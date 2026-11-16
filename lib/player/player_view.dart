@@ -12,6 +12,7 @@ import 'package:path/path.dart' as p;
 import '../ai/openrouter_client.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../platform/files.dart';
 import '../tts/engine_factory.dart';
 import 'lecture_player.dart';
 import 'reexplain.dart';
@@ -141,7 +142,7 @@ class _PlayerViewState extends ConsumerState<PlayerView> {
     }
     final client = OpenRouterClient(apiKey: settings.apiKey);
     return client.chat(
-      model: settings.lessonModel,
+      model: settings.tutorModel.model,
       messages: [
         const ChatMessage.system(ReexplainPrompt.system),
         ChatMessage.user(ReexplainPrompt.user(c)),
@@ -162,8 +163,9 @@ class _PlayerViewState extends ConsumerState<PlayerView> {
       return await synthesizeToWav(
         engine: engine,
         text: text,
+        // In a browser the clip is a blob: any name will do.
         outPath: p.join(
-          Directory.systemTemp.path,
+          filesAreBlobs ? '/tmp' : Directory.systemTemp.path,
           'learnmath_again_${DateTime.now().microsecondsSinceEpoch}.wav',
         ),
       );
@@ -299,6 +301,45 @@ class _SubtitleStage extends StatefulWidget {
   State<_SubtitleStage> createState() => _SubtitleStageState();
 }
 
+/// Coloured rounded backing for the current subtitle line. Hugs its text.
+class _SubtitleBubble extends StatelessWidget {
+  const _SubtitleBubble({
+    super.key,
+    required this.text,
+    required this.style,
+  });
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    // The text is white in both themes; the dark theme's primary is too
+    // light to carry it.
+    final primary = scheme.brightness == Brightness.dark
+        ? scheme.primaryContainer
+        : scheme.primary;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: primary,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: primary.withValues(alpha: 0.25),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        child: SubtitleText(text, style: style),
+      ),
+    );
+  }
+}
+
 class _SubtitleStageState extends State<_SubtitleStage> {
   Offset? _doubleTapAt;
 
@@ -342,7 +383,11 @@ class _SubtitleStageState extends State<_SubtitleStage> {
             (wide
                     ? theme.textTheme.headlineMedium
                     : theme.textTheme.headlineSmall)!
-                .copyWith(color: scheme.onSurface, height: 1.35);
+                .copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  height: 1.35,
+                );
         final context_ = theme.textTheme.bodyLarge!.copyWith(
           color: scheme.onSurfaceVariant.withValues(alpha: 0.6),
         );
@@ -416,8 +461,8 @@ class _SubtitleStageState extends State<_SubtitleStage> {
                                       duration: const Duration(
                                         milliseconds: 180,
                                       ),
-                                      child: SubtitleText(
-                                        segs[i].subtitle,
+                                      child: _SubtitleBubble(
+                                        text: segs[i].subtitle,
                                         key: ValueKey(i),
                                         style: current,
                                       ),

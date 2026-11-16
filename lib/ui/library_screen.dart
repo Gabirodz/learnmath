@@ -6,6 +6,7 @@ import '../core/models.dart';
 import '../core/providers.dart';
 import '../player/mini_player.dart';
 import 'create_sheet.dart';
+import 'review_sheet.dart';
 import 'widgets.dart';
 
 class LibraryScreen extends ConsumerWidget {
@@ -55,7 +56,10 @@ class LibraryScreen extends ConsumerWidget {
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: AdaptiveCards(children: [
-                    for (final c in cs) _CourseCard(course: c),
+                    for (final g in seriesGroups(cs))
+                      g.length == 1 && g.single.part == 1
+                          ? _CourseCard(course: g.single)
+                          : _SeriesCard(parts: g),
                   ]),
                 ),
               ),
@@ -91,6 +95,11 @@ class LibraryScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('LearnMath'),
         actions: [
+          IconButton(
+            tooltip: 'Review what you studied',
+            icon: const Icon(Icons.style_outlined),
+            onPressed: () => showReviewSheet(context),
+          ),
           IconButton(
             tooltip: 'Settings',
             icon: const Icon(Icons.settings_outlined),
@@ -201,9 +210,75 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+/// [courses] grouped by series: each group's parts in part order, the
+/// groups in the order of their newest part (newest first).
+List<List<Course>> seriesGroups(List<Course> courses) {
+  final groups = <String, List<Course>>{};
+  for (final c in courses) {
+    groups.putIfAbsent(c.series, () => []).add(c);
+  }
+  DateTime newest(List<Course> g) => g
+      .map((c) => c.createdAt)
+      .reduce((a, b) => a.isAfter(b) ? a : b);
+  return [
+    for (final g in groups.values) g..sort((a, b) => a.part.compareTo(b.part)),
+  ]..sort((a, b) => newest(b).compareTo(newest(a)));
+}
+
+/// The parts of a series together in one box.
+class _SeriesCard extends StatelessWidget {
+  const _SeriesCard({required this.parts});
+  final List<Course> parts;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    final scheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.primaryContainer.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: scheme.primary.withValues(alpha: 0.4)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 10, 8, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              child: Row(children: [
+                Icon(Icons.collections_bookmark_outlined,
+                    size: 18, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '${parts.first.title} · ${parts.length} '
+                    '${parts.length == 1 ? 'part' : 'parts'}',
+                    style: text.labelLarge?.copyWith(color: scheme.primary),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ]),
+            ),
+            for (var i = 0; i < parts.length; i++) ...[
+              if (i > 0) const SizedBox(height: 8),
+              _CourseCard(course: parts[i], showPart: true),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _CourseCard extends ConsumerWidget {
-  const _CourseCard({required this.course});
+  const _CourseCard({required this.course, this.showPart = false});
   final Course course;
+
+  /// Inside a series: says which part this is.
+  final bool showPart;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -230,10 +305,19 @@ class _CourseCard extends ConsumerWidget {
                   Expanded(
                     child: Padding(
                       padding: const EdgeInsets.only(top: 6),
-                      child: Text(course.title,
-                          style: text.titleMedium,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showPart)
+                            Text('Part ${course.part}',
+                                style: text.labelMedium
+                                    ?.copyWith(color: scheme.primary)),
+                          Text(course.title,
+                              style: text.titleMedium,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis),
+                        ],
+                      ),
                     ),
                   ),
                   PopupMenuButton<String>(

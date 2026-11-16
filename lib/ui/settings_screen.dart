@@ -3,10 +3,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/licenses.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../platform/files.dart';
+import '../tts/kokoro_web.dart';
 import '../tts/on_device_tts.dart';
 import '../tts/voice_install.dart';
+import 'backup_section.dart';
 import 'widgets.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -18,7 +22,6 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _key;
-  late final TextEditingController _model;
   late final TextEditingController _verifier;
   late final TextEditingController _ttsModel;
   late final TextEditingController _ttsVoice;
@@ -38,7 +41,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     super.initState();
     final s = ref.read(settingsProvider);
     _key = TextEditingController(text: s.apiKey);
-    _model = TextEditingController(text: s.chatModel);
     _verifier = TextEditingController(text: s.verifierModel);
     _ttsModel = TextEditingController(text: s.openRouterTtsModel);
     _ttsVoice = TextEditingController(text: s.openRouterTtsVoice);
@@ -52,7 +54,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   void dispose() {
     _debounce?.cancel();
     _key.dispose();
-    _model.dispose();
     _verifier.dispose();
     _ttsModel.dispose();
     _ttsVoice.dispose();
@@ -63,11 +64,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _refreshInstalled() async {
+    // In a browser the voice is not a downloaded file (see [_browserVoice]).
+    if (filesAreBlobs) return;
     final model = VoiceModel.byId(ref.read(settingsProvider).voiceModel);
     final v = await ref.read(voiceModelsProvider).isInstalled(model);
     if (mounted &&
         VoiceModel.byId(ref.read(settingsProvider).voiceModel) == model) {
       setState(() => _installed = v);
+    }
+  }
+
+  /// Opens [url] in the browser, or shows it when that is not possible.
+  Future<void> _open(String url) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(linkOpenerProvider)(Uri.parse(url));
+    } catch (_) {
+      messenger.showSnackBar(SnackBar(content: SelectableText(url)));
     }
   }
 
@@ -125,7 +138,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final s = ref.watch(settingsProvider);
     final text = Theme.of(context).textTheme;
     final scheme = Theme.of(context).colorScheme;
-    final preset = LessonModelPreset.byId(s.lessonPreset);
     final voice = VoiceModel.byId(s.voiceModel);
 
     Widget section(String title) => Padding(
@@ -174,139 +186,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     _update((s) => s.copyWith(apiKey: v.trim())),
                 onTapOutside: (_) => FocusScope.of(context).unfocus(),
               ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                isExpanded: true,
-                initialValue: preset == null
-                    ? LessonModelPreset.customId
-                    : preset.id,
-                decoration: const InputDecoration(
-                  labelText: 'Lesson model',
-                  border: OutlineInputBorder(),
-                ),
-                items: [
-                  for (final p in LessonModelPreset.all)
-                    DropdownMenuItem(
-                      value: p.id,
-                      child: Text(
-                        p.id == AppSettings.defaultLessonPreset
-                            ? '${p.label} · recommended'
-                            : p.label,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  const DropdownMenuItem(
-                    value: LessonModelPreset.customId,
-                    child: Text('Custom model…'),
-                  ),
-                ],
-                onChanged: (v) {
-                  // Another model starts from its own effort again.
-                  if (v != null) {
-                    _update((s) =>
-                        s.copyWith(lessonPreset: v, clearPresetEffort: true));
-                  }
-                },
-              ),
-              const SizedBox(height: 8),
-              if (preset != null) ...[
-                Text(preset.description, style: text.bodySmall),
-                const SizedBox(height: 2),
-                Text(
-                  '${preset.model} · ${s.lessonEffort == null ? 'default reasoning effort' : 'reasoning effort ${s.lessonEffort}'}',
-                  style: text.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ] else ...[
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _model,
-                  autocorrect: false,
-                  decoration: InputDecoration(
-                    labelText: 'Model',
-                    hintText: AppSettings.defaultChatModel,
-                    border: const OutlineInputBorder(),
-                    helperText: 'Default: ${AppSettings.defaultChatModel}',
-                    helperMaxLines: 2,
-                    suffixIcon: s.chatModel == AppSettings.defaultChatModel
-                        ? null
-                        : IconButton(
-                            tooltip: 'Reset to default',
-                            icon: const Icon(Icons.restart_alt),
-                            onPressed: () {
-                              _debounce?.cancel();
-                              _model.text = AppSettings.defaultChatModel;
-                              _update(
-                                (s) => s.copyWith(
-                                  chatModel: AppSettings.defaultChatModel,
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                  onChanged: (v) => _debounced(
-                    (s) => s.copyWith(
-                      chatModel: v.trim().isEmpty
-                          ? AppSettings.defaultChatModel
-                          : v.trim(),
-                    ),
-                  ),
-                  onTapOutside: (_) => FocusScope.of(context).unfocus(),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Use the Batch API'),
-                  subtitle: const Text('Half price; lessons arrive later'),
-                  value: s.customBatch,
-                  onChanged: (v) => _update((s) => s.copyWith(customBatch: v)),
-                ),
-              ],
-              if (s.lessonBatch) ...[
-                const SizedBox(height: 8),
-                Text(
-                  'Batch lessons cost about half and are written in the background. '
-                  'They usually arrive within minutes, at most a day, and LearnMath '
-                  'sends a notification when a lesson is ready.',
-                  style: text.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
               const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                // Rebuilt with the model: each preset has its own effort.
-                key: ValueKey('effort ${s.lessonPreset}'),
-                isExpanded: true,
-                initialValue: s.lessonEffort ?? '',
-                decoration: const InputDecoration(
-                  labelText: 'Reasoning effort',
-                  border: OutlineInputBorder(),
-                ),
-                items: [
-                  for (final e in reasoningEfforts)
-                    DropdownMenuItem(
-                      value: e,
-                      child: Text(e == recommendedEffort
-                          ? '${_effortLabel(e)} · recommended'
-                          : _effortLabel(e)),
-                    ),
-                ],
-                onChanged: (v) {
-                  if (v == null) return;
-                  _update((s) => preset == null
-                      ? s.copyWith(customEffort: v)
-                      : s.copyWith(presetEffort: v));
-                },
-              ),
-              const SizedBox(height: 8),
               Text(
-                'How long the model thinks before it writes. Higher levels '
-                'make fewer mistakes in proofs but cost more and take '
-                'longer; lower ones are cheaper and quicker. A model that '
-                'lacks a level uses the nearest one it has.',
+                'The model is picked where it is used: when you create a '
+                'lesson or a review, in the tutor chat and in the quiz.',
                 style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
               ),
+              // SymPy runs in a hidden WebView, which a browser tab lacks.
+              if (!filesAreBlobs)
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Check computations with SymPy'),
@@ -352,7 +239,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 segments: const [
                   ButtonSegment(
                     value: TtsBackend.onDevice,
-                    label: Text('On-device'),
+                    label: Text(filesAreBlobs ? 'In this browser' : 'On-device'),
                   ),
                   ButtonSegment(
                     value: TtsBackend.openRouter,
@@ -364,7 +251,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     _update((s) => s.copyWith(ttsBackend: v.first)),
               ),
               const SizedBox(height: 16),
-              if (s.ttsBackend == TtsBackend.onDevice) ...[
+              if (s.ttsBackend == TtsBackend.onDevice && filesAreBlobs)
+                ..._browserVoice(s, text, scheme)
+              else if (s.ttsBackend == TtsBackend.onDevice) ...[
                 DropdownButtonFormField<String>(
                   isExpanded: true,
                   initialValue: voice.id,
@@ -446,6 +335,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onTapOutside: (_) => FocusScope.of(context).unfocus(),
                 ),
               ],
+              // Books, and backups as files, need a device's file system.
+              if (!filesAreBlobs) ...[
               section('Your books'),
               Text(
                 'How the pages of an imported PDF are read into text and formulas.',
@@ -522,6 +413,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onTapOutside: (_) => FocusScope.of(context).unfocus(),
                 ),
               ],
+              ],
               section('Studying'),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -596,10 +488,52 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                 ],
               ),
+              if (!filesAreBlobs) const BackupSection(),
               section('About'),
               Text(
                 'LearnMath turns your questions into graduate-level lectures, written and narrated by AI. Check important results against a textbook.',
                 style: text.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'LearnMath is free, and so is its source code. If it helps '
+                'you, you can support its development.',
+                style: text.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  FilledButton.tonalIcon(
+                    icon: const Icon(Icons.coffee_outlined, size: 18),
+                    label: const Text('Buy me a coffee'),
+                    onPressed: () => _open(appSupportUrl),
+                  ),
+                  TextButton.icon(
+                    icon: const Icon(Icons.code, size: 18),
+                    label: const Text('Source code'),
+                    onPressed: () => _open(appSourceUrl),
+                  ),
+                  TextButton.icon(
+                    icon: const Icon(Icons.description_outlined, size: 18),
+                    label: const Text('Open-source licences'),
+                    onPressed: () => showLicensePage(
+                      context: context,
+                      applicationName: 'LearnMath',
+                      applicationLegalese: appLegalese,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                appLegalese,
+                style: text.bodySmall?.copyWith(
                   color: scheme.onSurfaceVariant,
                 ),
               ),
@@ -608,12 +542,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
   }
-
-  static String _effortLabel(String effort) => switch (effort) {
-        '' => 'Model default',
-        'xhigh' => 'Extra high',
-        _ => '${effort[0].toUpperCase()}${effort.substring(1)}',
-      };
 
   /// What a pause setting does to a lecture, in words.
   String _pacing(double v) {
@@ -630,6 +558,41 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final t = v.toStringAsFixed(2);
     return t.replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
   }
+
+  /// The voice in a browser: Kokoro through kokoro-js, which fetches its
+  /// model itself when the first lecture is recorded.
+  List<Widget> _browserVoice(
+          AppSettings s, TextTheme text, ColorScheme scheme) =>
+      [
+        DropdownButtonFormField<String>(
+          isExpanded: true,
+          initialValue: KokoroVoice.byId(s.browserVoice).id,
+          decoration: const InputDecoration(
+            labelText: 'Voice',
+            border: OutlineInputBorder(),
+          ),
+          items: [
+            for (final v in kokoroVoices)
+              DropdownMenuItem(
+                value: v.id,
+                child: Text(v.label, overflow: TextOverflow.ellipsis),
+              ),
+          ],
+          onChanged: (v) {
+            if (v != null) _update((s) => s.copyWith(browserVoice: v));
+          },
+        ),
+        const SizedBox(height: 12),
+        Text(
+          'Kokoro runs in this browser, free of charge: on the graphics '
+          'card where the browser supports WebGPU (Chrome and Edge do), '
+          'otherwise on the processor, which is several times slower. The '
+          'voice is downloaded once, when the first lecture is recorded: '
+          'about 330 MB with WebGPU, 90 MB without. Keep this tab open '
+          'while a lecture is being recorded.',
+          style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+      ];
 
   Widget _modelRow(VoiceModel model, TextTheme text, ColorScheme scheme) {
     if (_installingId == model.id) {

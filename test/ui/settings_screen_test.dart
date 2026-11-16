@@ -21,6 +21,10 @@ class _Settings extends SettingsNotifier {
 late Directory _tmp;
 late ProviderContainer _container;
 
+/// Pages the settings screen asked the browser to open.
+final _opened = <Uri>[];
+bool _browserFails = false;
+
 Future<void> _pump(
   WidgetTester tester, {
   AppSettings? initial,
@@ -35,6 +39,10 @@ Future<void> _pump(
     overrides: [
       settingsProvider.overrideWith(_Settings.new),
       voiceModelsProvider.overrideWithValue(VoiceModelManager(_tmp.path)),
+      linkOpenerProvider.overrideWithValue((url) async {
+        if (_browserFails) throw StateError('no browser');
+        _opened.add(url);
+      }),
     ],
   );
   addTearDown(_container.dispose);
@@ -82,6 +90,58 @@ Future<void> _choose(WidgetTester tester, Finder dropdown, String item) async {
 }
 
 void main() {
+  setUp(() {
+    _opened.clear();
+    _browserFails = false;
+  });
+
+  testWidgets('About: the coffee and source buttons open their pages',
+      (tester) async {
+    await _pump(tester, size: const Size(400, 900));
+    final coffee = find.text('Buy me a coffee');
+    await tester.scrollUntilVisible(coffee, 300,
+        scrollable: find.byType(Scrollable).first);
+    await tester.tap(coffee);
+    await tester.pump();
+    await tester.tap(find.text('Source code'));
+    await tester.pump();
+    expect(_opened.map((u) => u.toString()), [
+      'https://buymeacoffee.com/gabirodz',
+      'https://github.com/Gabirodz/learnmath',
+    ]);
+  });
+
+  testWidgets('About: without a browser the address is shown instead',
+      (tester) async {
+    _browserFails = true;
+    await _pump(tester, size: const Size(400, 900));
+    final coffee = find.text('Buy me a coffee');
+    await tester.scrollUntilVisible(coffee, 300,
+        scrollable: find.byType(Scrollable).first);
+    await tester.tap(coffee);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(find.text('https://buymeacoffee.com/gabirodz'), findsOneWidget);
+  });
+
+  testWidgets('About shows the licence and opens the licences page',
+      (tester) async {
+    await _pump(tester, size: const Size(400, 900));
+    final button = find.text('Open-source licences');
+    await tester.scrollUntilVisible(button, 300,
+        scrollable: find.byType(Scrollable).first);
+    await tester.scrollUntilVisible(
+        find.textContaining('GNU General Public License'), 100,
+        scrollable: find.byType(Scrollable).first);
+    await tester.ensureVisible(button);
+    await tester.pump();
+    await tester.tap(button);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byType(LicensePage), findsOneWidget);
+    expect(find.text('LearnMath'), findsWidgets);
+  });
+
   for (final (scale, words) in const [
     (0.75, 'Shorter pauses (0.75× the scripted length)'),
     (1.0, 'Pauses as the lecturer scripted them.'),
@@ -96,73 +156,13 @@ void main() {
     });
   }
 
-  testWidgets('default shows Sol batch preset and no custom fields', (
-    tester,
-  ) async {
+  testWidgets('the model is not picked in Settings any more', (tester) async {
     await _pump(tester);
-    expect(find.text('GPT-6.1 Sol (batch) · recommended'), findsOneWidget);
-    expect(find.textContaining('Most accurate'), findsOneWidget);
-    expect(
-      find.textContaining('openai/gpt-6.1-sol · reasoning effort high'),
-      findsOneWidget,
-    );
-    expect(find.textContaining('notification'), findsOneWidget);
-    expect(find.text('Model'), findsNothing);
-    expect(find.text('Use the Batch API'), findsNothing);
-    expect(find.text('Reasoning effort'), findsOneWidget);
-    expect(find.text('High · recommended'), findsOneWidget);
+    expect(find.textContaining('The model is picked where it is used'),
+        findsOneWidget);
+    expect(find.text('Reasoning effort'), findsNothing);
+    expect(find.textContaining('GPT-6.1 Sol'), findsNothing);
     expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('the effort of a preset can be changed; another model starts '
-      'from its own again', (tester) async {
-    await _pump(tester);
-    await _choose(tester, find.text('High · recommended'), 'Extra high');
-    expect(_s.presetEffort, 'xhigh');
-    expect(_s.lessonEffort, 'xhigh');
-    expect(_s.lessonModel, 'openai/gpt-6.1-sol');
-
-    await _choose(tester, find.text('Extra high'), 'Model default');
-    expect(_s.lessonEffort, isNull);
-
-    await tester.drag(find.byType(Scrollable).first, const Offset(0, 800));
-    await tester.pumpAndSettle();
-    await _choose(
-        tester, find.text('GPT-6.1 Sol (batch) · recommended'), 'GPT-6.1 Terra (batch)');
-    expect(_s.presetEffort, isNull);
-    expect(_s.lessonEffort, 'high');
-    expect(find.text('High · recommended'), findsOneWidget);
-  });
-
-  testWidgets('choosing Luna updates the lesson model', (tester) async {
-    await _pump(tester);
-    await _choose(tester, find.text('GPT-6.1 Sol (batch) · recommended'), 'GPT-6 Luna');
-    expect(_s.lessonModel, 'openai/gpt-6-luna');
-    expect(_s.lessonBatch, isFalse);
-    expect(find.textContaining('notification'), findsNothing);
-  });
-
-  testWidgets('custom model reveals fields and batch toggle works', (
-    tester,
-  ) async {
-    await _pump(tester);
-    await _choose(tester, find.text('GPT-6.1 Sol (batch) · recommended'), 'Custom model…');
-    expect(_s.lessonPreset, LessonModelPreset.customId);
-    expect(find.text('Model'), findsOneWidget);
-    expect(find.text('Use the Batch API'), findsOneWidget);
-    expect(find.text('Reasoning effort'), findsOneWidget);
-    expect(find.text('Model default'), findsOneWidget);
-
-    final sw = find.widgetWithText(SwitchListTile, 'Use the Batch API');
-    await tester.ensureVisible(sw);
-    await tester.tap(sw);
-    await tester.pumpAndSettle();
-    expect(_s.customBatch, isTrue);
-    expect(_s.lessonBatch, isTrue);
-
-    await _choose(tester, find.text('Model default'), 'High · recommended');
-    expect(_s.customEffort, 'high');
-    expect(_s.lessonEffort, 'high');
   });
 
   testWidgets('switching voice model resets speaker and shows size', (

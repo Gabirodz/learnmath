@@ -16,3 +16,24 @@ Lesson? nextToPlay(Lesson finished, List<Lesson> courseLessons) {
   }
   return best;
 }
+
+/// The part that follows [course] in its series (the lowest later part
+/// number, so a deleted part is skipped), or null.
+Course? nextPart(Course course, List<Course> all) {
+  Course? best;
+  for (final c in all) {
+    if (c.series != course.series || c.part <= course.part) continue;
+    if (best == null || c.part < best.part) best = c;
+  }
+  return best;
+}
+
+/// The first lesson of a course, in course order, that has a recording.
+Lesson? firstToPlay(List<Lesson> courseLessons) {
+  Lesson? best;
+  for (final l in courseLessons) {
+    if (l.stage != LessonStage.ready || !l.hasAudio) continue;
+    if (best == null || l.order < best.order) best = l;
+  }
+  return best;
+}

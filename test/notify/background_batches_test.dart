@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:learnmath/ai/openrouter_client.dart';
 import 'package:learnmath/notify/background_batches.dart';
+import 'package:learnmath/notify/local_notifications.dart';
 import 'package:learnmath/notify/notifications.dart';
 
 WaitingBatch w(String batch, String lesson) =>
@@ -74,6 +75,19 @@ void main() {
         });
     expect(r.announce.map((e) => e.lessonId), ['l2']);
     expect(r.announced, {'b2'});
+  });
+
+  test('an arrived batch is one notification, and does not say "ready"', () {
+    final one = LocalNotifications.batchArrivedText([w('b1', 'l1')]);
+    expect(one.title, 'A lesson can continue');
+    expect(one.body, contains('not finished yet'));
+    final many = LocalNotifications.batchArrivedText(
+        [for (var i = 0; i < 12; i++) w('b1', 'l$i')]);
+    expect(many.title, '12 lessons can continue');
+    expect('${many.title} ${many.body}'.toLowerCase(), isNot(contains('ready')));
+    expect(LocalNotifications.courseIdFromPayload('course:c1'), 'c1');
+    expect(LocalNotifications.courseIdFromPayload('lesson:l1'), isNull);
+    expect(LocalNotifications.lessonIdFromPayload('course:c1'), isNull);
   });
 
   test('WaitingBatch JSON round trip', () {

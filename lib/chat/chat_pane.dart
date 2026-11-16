@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/providers.dart';
 import '../notes/notes_view.dart';
+import '../ui/model_picker.dart';
 import 'chat_controller.dart';
 import 'chat_models.dart';
 
@@ -158,18 +159,31 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       padding: EdgeInsets.only(bottom: insets),
       child: Column(
         children: [
-          if (chat.turns.isNotEmpty)
-            Align(
-              alignment: Alignment.centerRight,
-              child: PopupMenuButton<String>(
-                tooltip: 'Chat options',
-                icon: const Icon(Icons.more_vert),
-                onSelected: (_) => _confirmClear(),
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'clear', child: Text('Clear conversation')),
-                ],
+          Row(
+            children: [
+              const SizedBox(width: 4),
+              // Which model answers; tap to pick another.
+              Expanded(
+                child: ModelButton(
+                  title: 'Chat model',
+                  value: ref.watch(settingsProvider.select((s) => s.tutorModel)),
+                  onChanged: (c) => ref
+                      .read(settingsProvider.notifier)
+                      .update((s) => s.copyWith(tutorChoice: c)),
+                ),
               ),
-            ),
+              if (chat.turns.isNotEmpty)
+                PopupMenuButton<String>(
+                  tooltip: 'Chat options',
+                  icon: const Icon(Icons.more_vert),
+                  onSelected: (_) => _confirmClear(),
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(
+                        value: 'clear', child: Text('Clear conversation')),
+                  ],
+                ),
+            ],
+          ),
           Expanded(
             child: !chat.loaded
                 ? const Center(child: CircularProgressIndicator())

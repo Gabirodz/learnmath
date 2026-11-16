@@ -1,10 +1,11 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:io' show SocketException;
 
 import 'package:flutter/foundation.dart';
 
 import '../ai/openrouter_client.dart';
 import '../core/models.dart';
+import '../platform/files.dart';
 import '../tts/tts_engine.dart';
 import '../tts/wav.dart';
 
@@ -276,7 +277,7 @@ class ReexplainController {
 
   static Future<void> _deleteQuietly(String path) async {
     try {
-      await File(path).delete();
+      await deleteFile(path);
     } catch (_) {}
   }
 }

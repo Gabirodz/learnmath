@@ -131,4 +131,18 @@ BRIEF: More basics.
       expect(cleanNotes(r'$$a \\[2pt] b$$'), r'$$a \\[2pt] b$$');
     });
   });
+
+  test('parseOutline reads ASSUMES lines of a later part', () {
+    final o = parseOutline('COURSE: Part two\n'
+        'LESSON: A\nBRIEF: a\nASSUMES: E3, E7\n'
+        'LESSON: B\nBRIEF: b\nASSUMES: none\n'
+        'LESSON: C\nBRIEF: c\n'
+        '**ASSUMES:** 2 and 5\n');
+    expect(o.lessons.map((l) => l.assumes), [
+      [3, 7],
+      <int>[],
+      [2, 5],
+    ]);
+    expect(o.lessons[2].brief, 'c');
+  });
 }

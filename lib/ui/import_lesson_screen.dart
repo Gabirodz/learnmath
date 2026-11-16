@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,6 +29,7 @@ class ImportLessonScreen extends ConsumerStatefulWidget {
     this.topic = '',
     this.course = false,
     this.lessonId,
+    this.continues,
   });
 
   /// What the student had already typed in the create sheet.
@@ -37,6 +40,10 @@ class ImportLessonScreen extends ConsumerStatefulWidget {
 
   /// The planned lesson of a course to write, instead of a new one.
   final String? lessonId;
+
+  /// With [course]: plan the next part of this course's series; the topic
+  /// field then says what the new part should cover (optional).
+  final String? continues;
 
   @override
   ConsumerState<ImportLessonScreen> createState() => _ImportLessonScreenState();
@@ -83,6 +90,15 @@ class _ImportLessonScreenState extends ConsumerState<ImportLessonScreen> {
     super.dispose();
   }
 
+  /// The prompt to hand over; a continuation's is read from the earlier
+  /// parts.
+  Future<String> _promptText() async {
+    final continues = widget.continues;
+    if (continues == null) return _prompt;
+    return ref.read(generationProvider).continuationPrompt(continues,
+        steer: _topic.text, lessonCount: _count);
+  }
+
   String get _prompt {
     if (widget.course) {
       return Prompts.externalOutline(_topic.text, lessonCount: _count);
@@ -103,13 +119,13 @@ class _ImportLessonScreenState extends ConsumerState<ImportLessonScreen> {
     ..showSnackBar(SnackBar(content: Text(message)));
 
   Future<void> _copyPrompt() async {
-    await Clipboard.setData(ClipboardData(text: _prompt));
+    await Clipboard.setData(ClipboardData(text: await _promptText()));
     if (!mounted) return;
     _say('Prompt copied. Paste it into your assistant.');
   }
 
-  Future<void> _sharePrompt() =>
-      SharePlus.instance.share(ShareParams(text: _prompt));
+  Future<void> _sharePrompt() async =>
+      SharePlus.instance.share(ShareParams(text: await _promptText()));
 
   /// Reads [text] as the answer, or as its continuation when [append].
   void _take(String text, {bool append = false}) {
@@ -150,10 +166,17 @@ class _ImportLessonScreenState extends ConsumerState<ImportLessonScreen> {
       allowedExtensions: const ['md', 'markdown', 'txt'],
     );
     if (files.isEmpty || !mounted) return;
-    final path = files.first.path;
+    final file = files.first;
     try {
-      if (path == null) throw const FileSystemException();
-      final text = await File(path).readAsString();
+      // A browser has no file system, so read the picked file's bytes.
+      final String text;
+      if (kIsWeb) {
+        text = utf8.decode(await file.readAsBytes(), allowMalformed: true);
+      } else {
+        final path = file.path;
+        if (path == null) throw const FileSystemException();
+        text = await File(path).readAsString();
+      }
       if (mounted) _take(text);
     } catch (_) {
       if (!mounted) return;
@@ -175,7 +198,10 @@ class _ImportLessonScreenState extends ConsumerState<ImportLessonScreen> {
     final gen = ref.read(generationProvider);
     try {
       if (outline != null) {
-        final id = await gen.importCourse(outline);
+        final continues = widget.continues;
+        final id = continues == null
+            ? await gen.importCourse(outline)
+            : await gen.importContinuation(continues, outline);
         router.pushReplacement('/course/$id');
       } else if (widget.lessonId != null) {
         // Back to the course, where the next lesson is waiting.
@@ -211,14 +237,16 @@ class _ImportLessonScreenState extends ConsumerState<ImportLessonScreen> {
     }
     final hasTopic = widget.lessonId != null
         ? target != null
-        : _topic.text.trim().isNotEmpty;
+        : widget.continues != null || _topic.text.trim().isNotEmpty;
     // Without a script the app has to write one itself.
     final canImport =
         outline != null || (lesson != null && (lesson.hasScript || hasKey));
 
     return Scaffold(
       appBar: AppBar(
-          title: Text(isCourse
+          title: Text(widget.continues != null
+              ? 'Plan the next part with your own AI'
+              : isCourse
               ? 'Plan a course with your own AI'
               : 'Write it with your own AI')),
       body: SafeArea(
@@ -274,9 +302,16 @@ class _ImportLessonScreenState extends ConsumerState<ImportLessonScreen> {
                 maxLines: 5,
                 textCapitalization: TextCapitalization.sentences,
                 decoration: InputDecoration(
-                  labelText:
-                      isCourse ? 'Course topic' : 'What do you want to learn?',
-                  hintText: isCourse ? 'Galois theory' : 'Sylow theorems',
+                  labelText: widget.continues != null
+                      ? 'What should the next part cover? (optional)'
+                      : isCourse
+                          ? 'Course topic'
+                          : 'What do you want to learn?',
+                  hintText: widget.continues != null
+                      ? 'Go on to unbounded operators'
+                      : isCourse
+                          ? 'Galois theory'
+                          : 'Sylow theorems',
                   border: const OutlineInputBorder(),
                   alignLabelWithHint: true,
                 ),

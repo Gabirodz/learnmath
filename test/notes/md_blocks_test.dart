@@ -1,3 +1,4 @@
+import 'package:flutter_math_fork/flutter_math.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:learnmath/notes/md_blocks.dart';
 
@@ -102,5 +103,27 @@ void main() {
     expect(def.inlines.first, const Inline.text('Definition 1.1.', bold: true));
     expect(def.inlines.where((e) => e.kind == InlineKind.math).length, 3);
     expect(def.inlines.any((e) => e.text == 'compact' && e.italic), isTrue);
+  });
+
+  group('normalizeTex', () {
+    test('a backslash before a line break becomes a control space', () {
+      expect(normalizeTex('\\exists N\\\n\\forall m'), '\\exists N\\ \\forall m');
+      expect(normalizeTex('a\\  \r\nb'), 'a\\ b');
+    });
+
+    test('line breaks of aligned (\\\\) and plain newlines stay', () {
+      const aligned = 'a &= b \\\\\nc &= d';
+      expect(normalizeTex(aligned), aligned);
+      expect(normalizeTex('a +\nb'), 'a +\nb');
+      // \\ then a control-space backslash: the last one is replaced.
+      expect(normalizeTex('a\\\\\\\nb'), 'a\\\\\\ b');
+    });
+
+    test('the formula from the notes parses after normalising', () {
+      final tex = '\\forall\\varepsilon>0\\ \\exists N\\\n'
+          '\\forall m,n\\ge N,\\quad |a_m-a_n|<\\varepsilon';
+      expect(Math.tex(tex).parseError, isNotNull);
+      expect(Math.tex(normalizeTex(tex)).parseError, isNull);
+    });
   });
 }

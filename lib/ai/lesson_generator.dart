@@ -1,6 +1,8 @@
 import 'package:learnmath/ai/narration_parser.dart';
 import 'package:learnmath/ai/openrouter_client.dart';
 import 'package:learnmath/ai/prompts.dart';
+import 'package:learnmath/cards/card_models.dart';
+import 'package:learnmath/cards/card_parser.dart';
 import 'package:learnmath/checks/check_parser.dart';
 import 'package:learnmath/checks/math_check.dart';
 import 'package:learnmath/checks/proof_review.dart';
@@ -29,6 +31,7 @@ class LessonGenerator {
     final raw = await client.chat(
       model: model,
       temperature: 0.4,
+      reasoningEffort: effort,
       messages: [
         const ChatMessage.system(Prompts.outlineSystem),
         ChatMessage.user(Prompts.outlineUser(topic, lessonCount: lessonCount)),
@@ -146,6 +149,31 @@ class LessonGenerator {
         ChatMessage.user(
             Prompts.recapUser(title: title, notesMarkdown: notesMarkdown)),
       ];
+
+  /// Key summary of one lesson, for the reviews that cover it.
+  static List<ChatMessage> digestMessages({
+    required String title,
+    required String notesMarkdown,
+  }) =>
+      [
+        const ChatMessage.system(Prompts.digestSystem),
+        ChatMessage.user(
+            Prompts.digestUser(title: title, notesMarkdown: notesMarkdown)),
+      ];
+
+  /// Short lesson and flashcards of a review of [lessons].
+  static List<ChatMessage> reviewMessages(
+          List<({String title, String digest})> lessons) =>
+      [
+        const ChatMessage.system(Prompts.reviewSystem),
+        ChatMessage.user(Prompts.reviewUser(lessons)),
+      ];
+
+  /// The short lesson of a review and the flashcards that follow it.
+  static ({String notes, List<Flashcard> cards}) parseReview(String raw) {
+    final split = splitNotesAndCards(raw);
+    return (notes: parseNotes(split.notes).notes, cards: split.cards);
+  }
 
   static NotesDraft parseNotes(String raw) {
     final split = splitNotesAndChecks(raw);

@@ -19,7 +19,7 @@ class FakeControls implements PlayerControls {
     ),
   );
   final _playing = StreamController<bool>.broadcast();
-  int toggles = 0, stops = 0;
+  int toggles = 0, stops = 0, back = 0, forward = 0;
   @override
   bool playing = false;
   @override
@@ -35,6 +35,15 @@ class FakeControls implements PlayerControls {
     toggles++;
     playing = !playing;
     _playing.add(playing);
+  }
+
+  @override
+  Future<void> skipBy({required bool forward}) async {
+    if (forward) {
+      this.forward++;
+    } else {
+      back++;
+    }
   }
 
   @override
@@ -117,5 +126,27 @@ void main() {
     }
     final box = tester.getRect(find.byType(TransportButtons));
     expect(box.right, lessThanOrEqualTo(320));
+  });
+
+  testWidgets('skips back and forward, and fits at 320 dp', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final c = FakeControls();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar:
+              MiniPlayer(controls: c, onOpen: (_) {}, skipSeconds: 10),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.byTooltip('Back 10 seconds'));
+    await tester.tap(find.byTooltip('Forward 10 seconds'));
+    await tester.tap(find.byTooltip('Forward 10 seconds'));
+    expect(c.back, 1);
+    expect(c.forward, 2);
+    expect(find.byIcon(Icons.replay_10_rounded), findsOneWidget);
   });
 }

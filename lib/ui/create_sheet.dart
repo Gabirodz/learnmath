@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../ai/openrouter_client.dart';
 import '../ai/prerequisites.dart';
+import '../core/models.dart';
 import '../core/providers.dart';
+import '../platform/files.dart';
+import 'model_picker.dart';
 
 Future<void> showCreateSheet(BuildContext context) {
   final router = GoRouter.of(context);
@@ -46,6 +51,10 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
   bool _busy = false;
   String? _error;
 
+  /// The model this lesson or course is written with. Starts as the one
+  /// picked last time.
+  late ModelChoice _model = ref.read(settingsProvider).lessonChoice;
+
   /// What the lesson assumes, once looked up; null before that.
   List<Prerequisite>? _prereqs;
 
@@ -82,7 +91,7 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
     try {
       found = await checkPrerequisites(
         client: client,
-        model: settings.lessonModel,
+        model: _model.model,
         request: text,
         library: await ref.read(repositoryProvider).getAllLessons(),
       ).timeout(const Duration(seconds: 30));
@@ -141,6 +150,11 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
       _busy = true;
       _error = null;
     });
+    final model = _model;
+    // Remembered as the starting choice for the next lesson.
+    unawaited(ref
+        .read(settingsProvider.notifier)
+        .update((s) => s.withLessonChoice(model)));
     try {
       if (_mode == _Mode.lesson) {
         if (_prereqs == null) {
@@ -155,14 +169,19 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
         // Gaps first, so they are generated before the lesson that needs them.
         final prereqs = _prereqs ?? const <Prerequisite>[];
         for (final i in _alsoCreate.toList()..sort()) {
-          await gen.createLesson(prereqs[i].lessonRequest);
+          await gen.createLesson(prereqs[i].lessonRequest, model: model);
         }
-        final id = await gen.createLesson(text);
-        navigator.pop();
+        final id = await gen.createLesson(text, model: model);
+        // The sheet may have been dismissed meanwhile; popping then would
+        // close the screen beneath it and leave the lesson with no way back.
+        if (mounted) navigator.pop();
         router.push('/lesson/$id');
       } else {
-        final id = await gen.createCourse(text, lessonCount: _count);
-        navigator.pop();
+        final id = await gen.createCourse(text,
+            lessonCount: _count,
+            model: model,
+            planner: ref.read(settingsProvider).plannerModel);
+        if (mounted) navigator.pop();
         router.push('/course/$id');
       }
     } catch (e) {
@@ -179,7 +198,7 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
     final text = Theme.of(context).textTheme;
     final scheme = Theme.of(context).colorScheme;
     final hasKey = ref.watch(settingsProvider.select((s) => s.hasApiKey));
-    final batch = ref.watch(settingsProvider.select((s) => s.lessonBatch));
+    final batch = _model.batch;
     final isLesson = _mode == _Mode.lesson;
     final examples = isLesson ? _lessonExamples : _courseExamples;
 
@@ -211,20 +230,22 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
                       }),
             ),
             const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                icon: const Icon(Icons.picture_as_pdf_outlined),
-                label: const Text('Or import your own PDF book'),
-                onPressed: _busy
-                    ? null
-                    : () {
-                        final router = widget.router;
-                        Navigator.of(context).pop();
-                        router.push('/import-book');
-                      },
+            // Books are read from a file on the device; not in a browser yet.
+            if (!filesAreBlobs)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  icon: const Icon(Icons.picture_as_pdf_outlined),
+                  label: const Text('Or import your own PDF book'),
+                  onPressed: _busy
+                      ? null
+                      : () {
+                          final router = widget.router;
+                          Navigator.of(context).pop();
+                          router.push('/import-book');
+                        },
+                ),
               ),
-            ),
             Align(
               alignment: Alignment.centerLeft,
               child: TextButton.icon(
@@ -281,6 +302,24 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
               ),
             ],
             const SizedBox(height: 16),
+            if (hasKey) ...[
+              if (isLesson)
+                WriterButton(
+                  heading: 'Writes the lesson',
+                  value: _model,
+                  enabled: !_busy,
+                  onChanged: (c) => setState(() => _model = c),
+                )
+              else
+                CourseModelButtons(
+                  planHeading: 'Plans the course',
+                  writeHeading: 'Writes the lessons',
+                  writer: _model,
+                  enabled: !_busy,
+                  onWriterChanged: (c) => setState(() => _model = c),
+                ),
+              const SizedBox(height: 12),
+            ],
             if (batch && hasKey)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
@@ -288,8 +327,8 @@ class _CreateSheetState extends ConsumerState<_CreateSheet> {
                   isLesson
                       ? 'Written through the batch queue: ready in minutes to '
                           'hours, and you get a notification. Pick an '
-                          'immediate model in Settings if you want to wait '
-                          'for it here.'
+                          'immediate model above if you want to wait for it '
+                          'here.'
                       : 'The outline is planned now. Lessons you generate '
                           'then go through the batch queue and arrive in '
                           'minutes to hours, with a notification.',

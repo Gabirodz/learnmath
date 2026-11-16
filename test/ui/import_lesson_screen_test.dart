@@ -31,7 +31,10 @@ class _Gen implements GenerationService {
   }
 
   @override
-  Future<String> importCourse(CourseOutline outline) async {
+  Future<String> importCourse(CourseOutline outline,
+      {ModelChoice? model,
+      Course? continues,
+      List<Lesson> earlier = const []}) async {
     courses.add(outline);
     return 'C1';
   }

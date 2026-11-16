@@ -1,10 +1,11 @@
-import 'dart:io';
-
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:sembast/sembast_io.dart';
+import 'package:sembast/sembast.dart';
 
+import '../platform/files.dart';
+
+import '../cards/card_models.dart';
+import '../cards/card_store.dart';
 import '../quiz/quiz_store.dart';
 import 'models.dart';
 
@@ -20,9 +21,8 @@ class AppPaths {
   final String support;
 
   static Future<AppPaths> resolve() async {
-    final docs = await getApplicationDocumentsDirectory();
-    final support = await getApplicationSupportDirectory();
-    return AppPaths(docs: docs.path, support: support.path);
+    final dirs = await appDirectories();
+    return AppPaths(docs: dirs.docs, support: dirs.support);
   }
 
   String get dbPath => p.join(docs, 'learnmath.db');
@@ -36,7 +36,7 @@ class AppPaths {
 }
 
 Future<Database> openAppDatabase(AppPaths paths) =>
-    databaseFactoryIo.openDatabase(paths.dbPath);
+    openDatabaseAt(paths.dbPath);
 
 /// Courses and lessons.
 class LibraryRepository {
@@ -108,6 +108,10 @@ class LibraryRepository {
     return v == null ? null : Lesson.fromJson(v);
   }
 
+  Future<List<Course>> getCourses() async => [
+        for (final s in await _courses.find(_db)) Course.fromJson(s.value),
+      ];
+
   Future<Course?> getCourse(String id) async {
     final v = await _courses.record(id).get(_db);
     return v == null ? null : Course.fromJson(v);
@@ -145,11 +149,17 @@ class LibraryRepository {
         return updated;
       });
 
+  /// The flashcards of a review (kept out of the lesson record, like its
+  /// quizzes).
+  Future<void> saveCards(String lessonId, List<Flashcard> cards) =>
+      CardStore(_db).save(lessonId, cards);
+
   Future<void> deleteLesson(String id) async {
     await _lessons.record(id).delete(_db);
     await _chats.record(id).delete(_db);
     await _positions.record(id).delete(_db);
     await QuizStore.store.record(id).delete(_db);
+    await CardStore.store.record(id).delete(_db);
     await _deleteDir(_paths.lessonDir(id));
   }
 
@@ -162,6 +172,7 @@ class LibraryRepository {
       await _chats.records([for (final l in lessons) l.id]).delete(txn);
       await _positions.records([for (final l in lessons) l.id]).delete(txn);
       await QuizStore.store.records([for (final l in lessons) l.id]).delete(txn);
+      await CardStore.store.records([for (final l in lessons) l.id]).delete(txn);
     });
     for (final l in lessons) {
       await _deleteDir(_paths.lessonDir(l.id));
@@ -169,10 +180,7 @@ class LibraryRepository {
     await _deleteDir(_paths.bookDir(id));
   }
 
-  Future<void> _deleteDir(String path) async {
-    final dir = Directory(path);
-    if (await dir.exists()) await dir.delete(recursive: true);
-  }
+  Future<void> _deleteDir(String path) => deleteTree(path);
 }
 
 /// Settings live in the database, except the API key (secure storage).

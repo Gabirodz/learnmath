@@ -216,7 +216,7 @@ class _MathCache {
     if (_cache.containsKey(key)) return _cache[key];
     _MathImage? result;
     try {
-      result = await _renderUncached(tex.trim(), display);
+      result = await _renderUncached(normalizeTex(tex.trim()), display);
     } catch (_) {
       result = null;
     }

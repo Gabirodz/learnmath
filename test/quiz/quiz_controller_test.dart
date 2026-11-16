@@ -106,6 +106,33 @@ void main() {
       expect(c.read(quizControllerProvider('l1')).quizzes, hasLength(2));
     });
 
+    test('follows the store: a quiz the pipeline stores appears, and an '
+        'answer given meanwhile is not lost', () async {
+      answer = (_) => quizText;
+      final c = await make();
+      final ctl = c.read(quizControllerProvider('l1').notifier);
+      final id = await ctl.generate(
+          difficulty: QuizDifficulty.easy, kind: QuizKind.choice, count: 2);
+
+      // The pipeline adds a quiz that arrived from the Batch API.
+      await QuizStore(db).update('l1', (list) => [
+            Quiz(id: 'arrived', createdAt: DateTime(2026), questions: const [
+              QuizQuestion(prompt: 'Q', answer: 'A'),
+            ]),
+            ...list,
+          ]);
+      await pumpEventQueue();
+      expect(c.read(quizControllerProvider('l1')).byId('arrived'), isNotNull);
+
+      // Answering the first quiz now keeps the arrived one.
+      await ctl.selfGrade(id!, 1, 'my reply', Verdict.correct);
+      await pumpEventQueue();
+      final stored = await QuizStore(db).load('l1');
+      expect(stored.map((q) => q.id), containsAll(['arrived', id]));
+      expect(stored.firstWhere((q) => q.id == id).questions[1].verdict,
+          Verdict.correct);
+    });
+
     test('an unusable answer or a missing key is reported, nothing stored',
         () async {
       answer = (_) => 'I cannot help with that.';

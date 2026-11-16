@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show Random;
 
 import 'package:uuid/uuid.dart';
 
 import '../ai/lesson_generator.dart';
 import '../ai/lesson_import.dart';
+import '../ai/narration_parser.dart';
 import '../ai/narration_parts.dart';
 import '../ai/openrouter_client.dart';
 import '../ai/prompts.dart';
@@ -15,7 +17,13 @@ import '../checks/proof_review.dart';
 import '../core/models.dart';
 import '../core/storage.dart';
 import '../notify/notifications.dart';
+import '../platform/files.dart';
+import '../quiz/quiz_models.dart';
+import '../quiz/quiz_parser.dart';
+import '../quiz/quiz_prompts.dart';
+import '../quiz/quiz_store.dart';
 import '../tts/engine_factory.dart';
+import '../tts/kokoro_web.dart';
 import '../tts/lecture_audio_builder.dart';
 import '../tts/on_device_tts.dart';
 import '../tts/tts_engine.dart';
@@ -36,9 +44,12 @@ class JobProgress {
 /// audio. For a chapter of an imported book the "notes" are a transcription
 /// of its pages, and recording the lecture is a separate, optional step.
 ///
-/// Jobs run one at a time (on-device TTS is CPU-bound and model calls cost
-/// money), and every stage persists its result, so a failed or interrupted
-/// lesson resumes from the last finished stage instead of starting over.
+/// Jobs run one at a time (model calls cost money), and every stage persists
+/// its result, so a failed or interrupted lesson resumes from the last
+/// finished stage instead of starting over. Recording the lecture is the
+/// one stage that needs no model: a lesson whose script is written moves to
+/// a second queue, recorded one at a time (on-device TTS is CPU-bound),
+/// and the next lesson is written meanwhile.
 ///
 /// With a batch model the notes and the script are submitted to the Batch
 /// API instead of being awaited. The job then leaves the queue; once the
@@ -64,6 +75,7 @@ class GenerationService {
     OpenRouterClient Function(String apiKey)? createClient,
     this.createEngine,
     this.autoPoll = true,
+    this.quizzes,
   }) : _createClient =
             createClient ?? ((apiKey) => OpenRouterClient(apiKey: apiKey));
 
@@ -90,10 +102,31 @@ class GenerationService {
   /// [pollBatches] themselves.
   final bool autoPoll;
 
+  /// Where quizzes ordered through the Batch API wait and arrive. Null
+  /// disables ordering quizzes (some tests).
+  final QuizStore? quizzes;
+
   static const _uuid = Uuid();
-  static const _waitingLabel = 'Waiting for the batch answer…';
+
+  /// What a lesson in the batch queue is waiting for. A lesson goes through
+  /// the queue more than once (notes, then the lecture script), so "waiting"
+  /// alone would look stuck after the notes have arrived.
+  static String waitingLabel(Lesson lesson) => switch (lesson.stage) {
+        LessonStage.generatingNotes =>
+          'Waiting for the notes (batch queue)…',
+        LessonStage.generatingNarration =>
+          'Waiting for the lecture script (batch queue)…',
+        LessonStage.verifyingProofs =>
+          'Waiting for the proof review (batch queue)…',
+        _ => 'Waiting for the batch answer…',
+      };
   final _queue = <String>[];
   final _cancelled = <String>{};
+
+  /// Lessons whose script is written, waiting for their lecture to be
+  /// recorded; the first is being recorded while [_recording].
+  final _recordQueue = <String>[];
+  bool _recording = false;
 
   /// Explicit per-job choice of whether to go on to record audio.
   final _audioWanted = <String, bool>{};
@@ -117,11 +150,20 @@ class GenerationService {
   String _indexed = '';
   Completer<void>? _idle;
 
-  bool isQueued(String lessonId) => _queue.contains(lessonId);
+  bool isQueued(String lessonId) =>
+      _queue.contains(lessonId) || _recordQueue.contains(lessonId);
 
-  /// Completes when the queue is empty (lessons waiting for a batch do not
-  /// count).
-  Future<void> get idle => _running ? (_idle ??= Completer()).future : Future.value();
+  /// Completes when both queues are empty (lessons waiting for a batch do
+  /// not count).
+  Future<void> get idle => _running || _recording
+      ? (_idle ??= Completer()).future
+      : Future.value();
+
+  void _completeIdle() {
+    if (_running || _recording) return;
+    _idle?.complete();
+    _idle = null;
+  }
 
   /// Lessons left mid-generation by a previous app run can be resumed, so
   /// mark them failed-but-resumable instead of spinning forever. Lessons that
@@ -129,7 +171,7 @@ class GenerationService {
   Future<void> recoverInterrupted() async {
     for (final l in await repo.getAllLessons()) {
       if (l.isWaitingForBatch) {
-        onProgress(l.id, const JobProgress(_waitingLabel));
+        onProgress(l.id, JobProgress(waitingLabel(l)));
       } else if (l.stage.isWorking) {
         await repo.updateLesson(
           l.id,
@@ -146,13 +188,17 @@ class GenerationService {
 
   /// Creates a standalone lesson from a free-form request and starts
   /// generating it. Returns the lesson id.
-  Future<String> createLesson(String request) async {
+  ///
+  /// [model] is the model picked for it; without one it is written with
+  /// the model picked last time.
+  Future<String> createLesson(String request, {ModelChoice? model}) async {
     final text = request.trim();
     final lesson = Lesson(
       id: _uuid.v4(),
       title: _provisionalTitle(text),
       brief: text,
       createdAt: DateTime.now(),
+      model: model,
     );
     await repo.saveLesson(lesson);
     enqueue(lesson.id);
@@ -211,15 +257,20 @@ class GenerationService {
           settings.ttsBackend == TtsBackend.onDevice);
 
   /// Plans a course and stores it with all its lessons pending.
-  /// Returns the course id. Lessons are generated on demand.
-  Future<String> createCourse(String topic, {int? lessonCount}) async {
+  /// Returns the course id. [planner] plans it (by default the settings'
+  /// [AppSettings.plannerModel]); its lessons are generated on demand with
+  /// [model] unless another is picked for one.
+  Future<String> createCourse(String topic,
+      {int? lessonCount, ModelChoice? model, ModelChoice? planner}) async {
     final settings = _requireKey();
+    final plan = (planner ?? settings.plannerModel).immediate;
     final client = _createClient(settings.apiKey);
     try {
       // The user waits for the outline, so it is never batched.
-      final outline = await LessonGenerator(client, model: settings.lessonModel)
+      final outline = await LessonGenerator(client,
+              model: plan.model, effort: plan.effort)
           .generateOutline(topic.trim(), lessonCount: lessonCount);
-      return await importCourse(outline);
+      return await importCourse(outline, model: model);
     } finally {
       client.close();
     }
@@ -227,25 +278,202 @@ class GenerationService {
 
   /// Stores a planned course with all its lessons pending: one the lesson
   /// model planned, or one planned outside the app. Returns the course id.
-  Future<String> importCourse(CourseOutline outline) async {
+  ///
+  /// With [continues] the course is the next part of that course's series;
+  /// [earlier] are the lessons of all earlier parts in the numbering the
+  /// plan's `ASSUMES` lines use (see [importContinuation]).
+  Future<String> importCourse(CourseOutline outline,
+      {ModelChoice? model,
+      Course? continues,
+      List<Lesson> earlier = const []}) async {
     final course = Course(
       id: _uuid.v4(),
       title: outline.title,
       description: outline.description,
       createdAt: DateTime.now(),
+      continues: continues?.id,
+      seriesId: continues?.series,
+      part: continues == null ? 1 : continues.part + 1,
     );
     await repo.saveCourse(course);
     for (var i = 0; i < outline.lessons.length; i++) {
+      final o = outline.lessons[i];
       await repo.saveLesson(Lesson(
         id: _uuid.v4(),
         courseId: course.id,
         order: i,
-        title: outline.lessons[i].title,
-        brief: outline.lessons[i].brief,
+        title: o.title,
+        brief: o.brief,
         createdAt: DateTime.now(),
+        model: model,
+        buildsOn: [
+          for (final n in o.assumes.toSet())
+            if (n >= 1 && n <= earlier.length) earlier[n - 1].id,
+        ],
       ));
     }
     return course.id;
+  }
+
+  // ------------------------------------------------------- later parts
+
+  /// The parts of the series [courseId] belongs to, in part order.
+  Future<List<Course>> seriesOf(String courseId) async {
+    final course = await repo.getCourse(courseId);
+    if (course == null) return const [];
+    return [
+      for (final c in await repo.getCourses())
+        if (c.series == course.series) c,
+    ]..sort((a, b) => a.part.compareTo(b.part));
+  }
+
+  /// What an earlier lesson established, as the next parts are told: its
+  /// key summary, else its notes' Summary section, else its brief.
+  static String establishedBy(Lesson l) =>
+      l.digest ??
+      (l.hasNotes
+          ? summaryOf(l.notesMarkdown!)
+          : 'Not written yet. Planned: ${l.brief}');
+
+  /// The request that plans the part after the last one of [parts], and the
+  /// earlier lessons in the numbering it uses.
+  Future<({String request, List<Lesson> earlier})> _continuationRequest(
+      List<Course> parts,
+      {String steer = '',
+      int? lessonCount}) async {
+    final earlier = <Lesson>[];
+    final listed = <({
+      String title,
+      String description,
+      List<({int number, String title, String summary})> lessons
+    })>[];
+    for (final c in parts) {
+      final lessons = await repo.getCourseLessons(c.id);
+      listed.add((
+        title: c.title,
+        description: c.description,
+        lessons: [
+          for (final l in lessons)
+            (
+              number: earlier.length + lessons.indexOf(l) + 1,
+              title: l.title,
+              summary: establishedBy(l),
+            ),
+        ],
+      ));
+      earlier.addAll(lessons);
+    }
+    final request = Prompts.continuationUser(
+      seriesTitle: parts.first.title,
+      part: parts.last.part + 1,
+      earlier: listed,
+      steer: steer,
+      lessonCount: lessonCount,
+    );
+    return (request: request, earlier: earlier);
+  }
+
+  /// The prompt for planning the next part of [courseId]'s series with an
+  /// assistant outside the app. Uses the key summaries already made and the
+  /// notes' Summary sections otherwise; nothing is sent anywhere.
+  Future<String> continuationPrompt(String courseId,
+      {String steer = '', int? lessonCount}) async {
+    final parts = await seriesOf(courseId);
+    if (parts.isEmpty) throw StateError('The course no longer exists.');
+    final r = await _continuationRequest(parts,
+        steer: steer, lessonCount: lessonCount);
+    return Prompts.externalContinuation(r.request);
+  }
+
+  /// Plans the next part of the series [courseId] belongs to and stores it
+  /// with its lessons pending. Returns the new course id.
+  ///
+  /// The planner is told every lesson of the earlier parts with its key
+  /// summary. Missing summaries are written first, a few at a time (the
+  /// user is waiting), and kept: reviews and later parts reuse them.
+  /// [onStatus] reports progress ("Summarising earlier lessons (3 of 10)").
+  /// [planner] plans the part (by default [AppSettings.plannerModel]); the
+  /// summaries are written by the lesson model [model], asked right away.
+  Future<String> continueCourse(
+    String courseId, {
+    String steer = '',
+    int? lessonCount,
+    ModelChoice? model,
+    ModelChoice? planner,
+    void Function(String status)? onStatus,
+  }) async {
+    final settings = _requireKey();
+    final choice = (model ?? settings.lessonChoice).immediate;
+    final plan = (planner ?? settings.plannerModel).immediate;
+    final parts = await seriesOf(courseId);
+    if (parts.isEmpty) throw StateError('The course no longer exists.');
+    final client = _createClient(settings.apiKey);
+    try {
+      final missing = <Lesson>[
+        for (final c in parts)
+          for (final l in await repo.getCourseLessons(c.id))
+            if (l.hasNotes && l.digest == null) l,
+      ];
+      var done = 0;
+      void progress() => onStatus?.call(
+          'Summarising earlier lessons ($done of ${missing.length})…');
+      if (missing.isNotEmpty) progress();
+      Future<void> summarise(Lesson l) async {
+        try {
+          final text = await client.chat(
+            model: choice.model,
+            reasoningEffort: choice.effort,
+            temperature: LessonGenerator.reviewTemperature,
+            messages: LessonGenerator.digestMessages(
+                title: l.title, notesMarkdown: l.notesMarkdown!),
+          );
+          final digest = cleanNotes(text);
+          if (digest.isNotEmpty) {
+            await repo.updateLesson(l.id, (x) => x.copyWith(digest: digest));
+          }
+        } on OpenRouterException {
+          // The notes' Summary section stands in for it.
+        }
+        done++;
+        progress();
+      }
+
+      for (var i = 0; i < missing.length; i += 4) {
+        await Future.wait(missing.skip(i).take(4).map(summarise));
+      }
+
+      onStatus?.call('Planning part ${parts.last.part + 1}…');
+      final r = await _continuationRequest(parts,
+          steer: steer, lessonCount: lessonCount);
+      // The user waits for the plan, so it is never batched.
+      final raw = await client.chat(
+        model: plan.model,
+        reasoningEffort: plan.effort,
+        temperature: 0.4,
+        messages: [
+          const ChatMessage.system(
+              '${Prompts.outlineSystem}${Prompts.continuationAddendum}'),
+          ChatMessage.user(r.request),
+        ],
+      );
+      return await importCourse(parseOutline(raw),
+          model: model, continues: parts.last, earlier: r.earlier);
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Stores a plan for the next part of [courseId]'s series that an
+  /// assistant outside the app wrote from [continuationPrompt].
+  Future<String> importContinuation(String courseId, CourseOutline outline,
+      {ModelChoice? model}) async {
+    final parts = await seriesOf(courseId);
+    if (parts.isEmpty) throw StateError('The course no longer exists.');
+    final earlier = <Lesson>[
+      for (final c in parts) ...await repo.getCourseLessons(c.id),
+    ];
+    return importCourse(outline,
+        model: model, continues: parts.last, earlier: earlier);
   }
 
   /// Queues a lesson for (continued) generation.
@@ -255,7 +483,7 @@ class GenerationService {
   /// (for reading and chat) and recorded when queued again.
   void enqueue(String lessonId, {bool? audio}) {
     if (audio != null) _audioWanted[lessonId] = audio;
-    if (_queue.contains(lessonId)) return;
+    if (isQueued(lessonId)) return;
     _cancelled.remove(lessonId);
     _queue.add(lessonId);
     onProgress(lessonId, const JobProgress('Waiting…'));
@@ -266,6 +494,15 @@ class GenerationService {
 
   void cancel(String lessonId) {
     _cancelled.add(lessonId);
+    if (_recordQueue.contains(lessonId)) {
+      // The one being recorded stops at the next sentence.
+      if (_recordQueue.first != lessonId) {
+        _recordQueue.remove(lessonId);
+        _cancelled.remove(lessonId);
+        unawaited(_endRecording(lessonId, cancelled: true));
+      }
+      return;
+    }
     if (_queue.contains(lessonId)) {
       if (_queue.first != lessonId) {
         _queue.remove(lessonId);
@@ -330,6 +567,7 @@ class GenerationService {
       if (done == null ||
           l.recapMade ||
           l.isRecap ||
+          l.isReview ||
           !l.hasNotes ||
           time.difference(done) < reviewDelay) {
         continue;
@@ -341,6 +579,7 @@ class GenerationService {
         brief: 'A short review of "${l.title}".',
         createdAt: time,
         recapOf: l.id,
+        model: l.model,
         // What the student reads along with the review: the summary.
         notesMarkdown: '# $title\n\n${summaryOf(l.notesMarkdown!)}',
       );
@@ -361,6 +600,43 @@ class GenerationService {
     final body = m?.group(1)?.trim();
     if (body != null && body.isNotEmpty) return body;
     return notes.replaceFirst(RegExp(r'^#\s+.*\n'), '').trim();
+  }
+
+  /// The lessons a review can cover: studied (listened to the end, or
+  /// marked as studied) and with notes. Oldest first.
+  Future<List<Lesson>> studiedLessons() async {
+    final all = [
+      for (final l in await repo.getAllLessons())
+        if (l.completed && l.hasNotes && !l.isReview && !l.isRecap) l,
+    ];
+    all.sort((a, b) => (a.completedAt ?? a.createdAt)
+        .compareTo(b.completedAt ?? b.createdAt));
+    return all;
+  }
+
+  /// Creates a review of the studied lessons [lessonIds] (flashcards, a
+  /// short lesson with its lecture, and quizzes and chat over all of them)
+  /// and starts generating it. Returns its id.
+  Future<String> createReview(List<String> lessonIds,
+      {ModelChoice? model}) async {
+    if (lessonIds.isEmpty) throw ReviewFailed('Pick at least one lesson.');
+    final n = lessonIds.length;
+    final titles = <String>[];
+    for (final id in lessonIds) {
+      final l = await repo.getLesson(id);
+      if (l != null) titles.add(l.title);
+    }
+    final review = Lesson(
+      id: _uuid.v4(),
+      title: 'Review of $n ${n == 1 ? 'lesson' : 'lessons'}',
+      brief: 'A review of: ${titles.join('; ')}.',
+      createdAt: DateTime.now(),
+      covers: List.of(lessonIds),
+      model: model,
+    );
+    await repo.saveLesson(review);
+    enqueue(review.id);
+    return review.id;
   }
 
   /// Has a second model referee the proofs of a finished lesson. What it
@@ -388,8 +664,10 @@ class GenerationService {
     _pollTimer = null;
     try {
       final waiting = await _waitingLessons();
+      final waitingQuizzes = await _waitingQuizzes();
       final settings = readSettings();
-      if (waiting.isNotEmpty && settings.hasApiKey) {
+      if ((waiting.isNotEmpty || waitingQuizzes.isNotEmpty) &&
+          settings.hasApiKey) {
         final client = _createClient(settings.apiKey);
         try {
           final byBatch = <String, List<Lesson>>{};
@@ -397,17 +675,25 @@ class GenerationService {
             if (_queue.contains(l.id)) continue;
             byBatch.putIfAbsent(l.batch!.id, () => []).add(l);
           }
-          for (final entry in byBatch.entries) {
+          final quizzesByBatch =
+              <String, List<({String lessonId, Quiz quiz})>>{};
+          for (final q in waitingQuizzes) {
+            quizzesByBatch.putIfAbsent(q.quiz.batch!.id, () => []).add(q);
+          }
+          for (final id in {...byBatch.keys, ...quizzesByBatch.keys}) {
             final BatchInfo info;
             try {
-              info = await client.getBatch(entry.key);
+              info = await client.getBatch(id);
             } catch (_) {
               continue; // offline or a hiccup: ask again next time
             }
             if (!info.isTerminal) continue;
             _fetched[info.id] = info;
-            for (final l in entry.value) {
+            for (final l in byBatch[id] ?? const <Lesson>[]) {
               enqueue(l.id);
+            }
+            for (final q in quizzesByBatch[id] ?? const []) {
+              await _collectQuiz(q.lessonId, q.quiz, info);
             }
           }
         } finally {
@@ -425,16 +711,50 @@ class GenerationService {
           if (l.isWaitingForBatch) l,
       ];
 
+  Future<List<({String lessonId, Quiz quiz})>> _waitingQuizzes() async =>
+      await quizzes?.waiting() ?? const [];
+
+  /// Everything that waits for a Batch API answer: lessons, and quizzes
+  /// ordered for later.
+  Future<List<({PendingBatch batch, WaitingBatch entry})>> _waiters() async {
+    final titles = <String, String>{};
+    final lessons = await _waitingLessons();
+    for (final l in lessons) {
+      titles[l.id] = l.title;
+    }
+    final out = <({PendingBatch batch, WaitingBatch entry})>[
+      for (final l in lessons)
+        (
+          batch: l.batch!,
+          entry: WaitingBatch(
+              batchId: l.batch!.id, lessonId: l.id, lessonTitle: l.title),
+        ),
+    ];
+    for (final q in await _waitingQuizzes()) {
+      final title = titles[q.lessonId] ??=
+          (await repo.getLesson(q.lessonId))?.title ?? 'Lesson';
+      out.add((
+        batch: q.quiz.batch!,
+        entry: WaitingBatch(
+            batchId: q.quiz.batch!.id,
+            lessonId: q.lessonId,
+            lessonTitle: title,
+            quizId: q.quiz.id),
+      ));
+    }
+    return out;
+  }
+
   /// Most batches finish within minutes, so ask often at first and back off
   /// for the ones that take hours.
   Future<void> _schedulePoll() async {
     if (!autoPoll || _pollTimer != null) return;
-    final waiting = await _waitingLessons();
+    final waiting = await _waiters();
     if (waiting.isEmpty) return;
     final now = DateTime.now();
     var youngest = const Duration(days: 1);
-    for (final l in waiting) {
-      final age = now.difference(l.batch!.submittedAt);
+    for (final w in waiting) {
+      final age = now.difference(w.batch.submittedAt);
       if (age < youngest) youngest = age;
     }
     final delay = youngest < const Duration(minutes: 3)
@@ -450,12 +770,10 @@ class GenerationService {
 
   /// Tells the background check which batches are being waited for.
   Future<void> _syncWaiting() async {
-    final waiting = [
-      for (final l in await _waitingLessons())
-        WaitingBatch(
-            batchId: l.batch!.id, lessonId: l.id, lessonTitle: l.title),
-    ];
-    final key = waiting.map((w) => '${w.batchId}/${w.lessonId}').join(',');
+    final waiting = [for (final w in await _waiters()) w.entry];
+    final key = waiting
+        .map((w) => '${w.batchId}/${w.lessonId}/${w.quizId ?? ''}')
+        .join(',');
     await _refreshKeepAlive(waiting.length);
     if (key == _indexed) return;
     _indexed = key;
@@ -465,12 +783,12 @@ class GenerationService {
   /// Holds the app alive while lessons are being worked on or waited for.
   Future<void> _refreshKeepAlive([int? waiting]) async {
     String count(int n, String what) => '$n $what${n == 1 ? '' : 's'}';
-    final working = _queue.length + _outbox.length;
+    final working = _queue.length + _outbox.length + _recordQueue.length;
     if (working > 0) {
       await keepAlive.hold('Working on ${count(working, 'lesson')}');
       return;
     }
-    final n = waiting ?? (await _waitingLessons()).length;
+    final n = waiting ?? (await _waiters()).length;
     if (n > 0) {
       await keepAlive.hold('Waiting for ${count(n, 'batch answer')}');
     } else {
@@ -537,6 +855,7 @@ class GenerationService {
               step: o.step,
               submittedAt: now,
               parts: o.prompts.length,
+              keys: o.keys,
             ),
           ),
         );
@@ -570,6 +889,7 @@ class GenerationService {
         }
         final id = _queue.first;
         var suspended = false;
+        var toRecord = false;
         final before = await repo.getLesson(id);
         // Re-running checks on a finished lesson is not news, nor is a
         // review the user is watching (a batched one arrives much later).
@@ -581,6 +901,8 @@ class GenerationService {
           if (!quiet) await _announce(id);
         } on _WaitingForBatch {
           suspended = true;
+        } on _RecordNext {
+          toRecord = true;
         } on GenerationCancelled {
           await repo.updateLesson(
             id,
@@ -603,11 +925,26 @@ class GenerationService {
           if (!suspended) unawaited(_deleteIfUnused(before?.batch?.id));
           _queue.remove(id);
           _collected.remove(id);
-          _cancelled.remove(id);
           _checksOnly.remove(id);
           if (!suspended) _audioWanted.remove(id);
-          await notifications.clearProgress(id);
-          onProgress(id, suspended ? const JobProgress(_waitingLabel) : null);
+          if (toRecord) {
+            // Recorded by [_drainRecordings] while the next job runs; a
+            // cancel meanwhile is left for it to see.
+            _recordQueue.add(id);
+            onProgress(id, const JobProgress('Waiting to record…'));
+            unawaited(_drainRecordings());
+          } else {
+            _cancelled.remove(id);
+            await notifications.clearProgress(id);
+            // The last lesson of a course to end may be one that failed.
+            final courseId = before?.courseId;
+            if (!suspended && courseId != null) {
+              await _announceCourse(courseId, except: id);
+            }
+            final waiting = suspended ? await repo.getLesson(id) : null;
+            onProgress(id,
+                waiting == null ? null : JobProgress(waitingLabel(waiting)));
+          }
         }
         await _syncWaiting();
       }
@@ -616,17 +953,106 @@ class GenerationService {
       final runner = _checkRunner;
       _checkRunner = null;
       await runner?.dispose();
-      _idle?.complete();
-      _idle = null;
+      _completeIdle();
       await _schedulePoll();
     }
   }
 
+  /// Records the lectures of [_recordQueue], one at a time, apart from
+  /// [_drain]: recording needs no model, so the next lesson is written
+  /// meanwhile.
+  Future<void> _drainRecordings() async {
+    if (_recording) return;
+    _recording = true;
+    try {
+      while (_recordQueue.isNotEmpty) {
+        final id = _recordQueue.first;
+        var cancelled = false;
+        try {
+          await _record(id);
+          await _announce(id);
+        } on GenerationCancelled {
+          cancelled = true;
+        } catch (e) {
+          final reason = _describe(e);
+          final failed = await repo.updateLesson(
+            id,
+            (l) => l.copyWith(stage: LessonStage.failed, error: reason),
+          );
+          if (failed != null) {
+            await notifications.lessonFailed(id, failed.title, reason);
+          }
+        } finally {
+          _recordQueue.remove(id);
+          _cancelled.remove(id);
+          await _endRecording(id, cancelled: cancelled);
+        }
+        await _syncWaiting();
+      }
+    } finally {
+      _recording = false;
+      _completeIdle();
+    }
+  }
+
+  /// What ends a lesson's turn in [_recordQueue], recorded or not.
+  Future<void> _endRecording(String id, {required bool cancelled}) async {
+    final lesson = cancelled
+        ? await repo.updateLesson(
+            id,
+            (l) => l.copyWith(stage: LessonStage.failed, error: 'Cancelled.'),
+          )
+        : await repo.getLesson(id);
+    await notifications.clearProgress(id);
+    // The last lesson of a course to end may be one that failed.
+    final courseId = lesson?.courseId;
+    if (courseId != null) await _announceCourse(courseId, except: id);
+    onProgress(id, null);
+  }
+
+  /// Lessons of a course that became ready and have not been announced
+  /// yet, by course id.
+  final _courseReady = <String, List<Lesson>>{};
+
   Future<void> _announce(String id) async {
     final lesson = await repo.getLesson(id);
     if (lesson == null || lesson.stage != LessonStage.ready) return;
-    await notifications.lessonReady(id, lesson.title,
-        hasAudio: lesson.hasAudio);
+    final courseId = lesson.courseId;
+    if (courseId == null) {
+      await notifications.lessonReady(id, lesson.title,
+          hasAudio: lesson.hasAudio);
+      return;
+    }
+    // A course generated at once is announced once, when its last lesson
+    // is done, not once per lesson.
+    _courseReady.putIfAbsent(courseId, () => []).add(lesson);
+    await _announceCourse(courseId, except: id);
+  }
+
+  /// Tells the user about the lessons of [courseId] that became ready, once
+  /// no other lesson of the course is still being made. [except] is the
+  /// lesson whose job is just ending.
+  Future<void> _announceCourse(String courseId, {required String except}) async {
+    final ready = _courseReady[courseId];
+    if (ready == null || ready.isEmpty) return;
+    for (final l in await repo.getCourseLessons(courseId)) {
+      if (l.id == except) continue;
+      if (isQueued(l.id) ||
+          _outbox.any((o) => o.lessonId == l.id) ||
+          l.isWaitingForBatch ||
+          l.stage.isWorking) {
+        return;
+      }
+    }
+    _courseReady.remove(courseId);
+    if (ready.length == 1) {
+      final l = ready.single;
+      await notifications.lessonReady(l.id, l.title, hasAudio: l.hasAudio);
+      return;
+    }
+    final course = await repo.getCourse(courseId);
+    await notifications.courseReady(
+        courseId, course?.title ?? 'Your course', ready.length);
   }
 
   Future<void> _run(String id) async {
@@ -660,10 +1086,11 @@ class GenerationService {
     if (needsKey && !settings.hasApiKey) throw const MissingApiKey();
 
     final client = _createClient(settings.apiKey);
-    TtsEngine? engine;
     try {
-      final generator = LessonGenerator(client,
-          model: settings.lessonModel, effort: settings.lessonEffort);
+      // The model picked for this lesson, or the one picked last.
+      final choice = lesson.model ?? settings.lessonChoice;
+      final generator =
+          LessonGenerator(client, model: choice.model, effort: choice.effort);
       final course = await courseContext(lesson);
 
       // Sends the requests of one step and returns their answers in order.
@@ -676,6 +1103,7 @@ class GenerationService {
         required String Function(int part) label,
         String? model,
         String? effort,
+        List<String> keys = const [],
       }) async {
         final pending = lesson!.batch;
         if (pending != null && pending.step == step) {
@@ -684,7 +1112,7 @@ class GenerationService {
           _collected[id] = pending.id;
           return answers;
         }
-        if (!settings.lessonBatch) {
+        if (!choice.batch) {
           final answers = <String>[];
           for (var i = 0; i < prompts.length; i++) {
             final text = label(i);
@@ -708,9 +1136,10 @@ class GenerationService {
           lessonId: id,
           step: step,
           prompts: prompts,
-          model: model ?? settings.lessonModel,
-          effort: model == null ? settings.lessonEffort : effort,
+          model: model ?? choice.model,
+          effort: model == null ? choice.effort : effort,
           temperature: temperature,
+          keys: keys,
         ));
         throw const _WaitingForBatch();
       }
@@ -720,7 +1149,7 @@ class GenerationService {
       if (!lesson.hasNotes && lesson.isBookChapter) {
         final book = await repo.getCourse(lesson.courseId ?? '');
         final bookPath = book?.bookPath;
-        if (bookPath == null || !await File(bookPath).exists()) {
+        if (bookPath == null || !await fileExists(bookPath)) {
           throw TranscriptionException('The book file is missing.');
         }
         lesson = await update((l) =>
@@ -735,6 +1164,80 @@ class GenerationService {
         );
         check();
         lesson = await update((l) => l.copyWith(notesMarkdown: text));
+      } else if (!lesson.hasNotes && lesson.isReview) {
+        lesson = await update((l) =>
+            l.copyWith(stage: LessonStage.generatingNotes, clearError: true));
+        // A review is written from the key summary of each lesson, not from
+        // its notes. A summary is made once and kept with its lesson.
+        final asked = lesson.batch?.step == BatchStep.digest
+            ? lesson.batch!.keys
+            : null;
+        final targets = <String>[...?asked];
+        final prompts = <List<ChatMessage>>[];
+        for (final sid in asked == null ? lesson.covers : const <String>[]) {
+          final s = await repo.getLesson(sid);
+          if (s == null || !s.hasNotes || s.digest != null) continue;
+          targets.add(sid);
+          prompts.add(LessonGenerator.digestMessages(
+            title: s.title,
+            notesMarkdown: s.isBookChapter
+                ? stripPageMarkers(s.notesMarkdown!)
+                : s.notesMarkdown!,
+          ));
+        }
+        if (targets.isNotEmpty) {
+          final answers = await ask(
+            BatchStep.digest,
+            prompts,
+            keys: targets,
+            temperature: LessonGenerator.reviewTemperature,
+            label: (i) => targets.length == 1
+                ? 'Summarising what you studied…'
+                : 'Summarising what you studied… ${i + 1} of ${targets.length}',
+          );
+          for (var i = 0; i < targets.length && i < answers.length; i++) {
+            final digest = cleanNotes(answers[i]);
+            if (digest.isEmpty) continue;
+            await repo.updateLesson(
+                targets[i], (l) => l.copyWith(digest: digest));
+          }
+          lesson = await update((l) => l.copyWith(clearBatch: true));
+          _forget(id);
+        }
+        final sources = <({String title, String digest})>[];
+        for (final sid in lesson.covers) {
+          final s = await repo.getLesson(sid);
+          if (s == null || !s.hasNotes) continue;
+          sources.add((
+            title: s.title,
+            digest: s.digest ?? summaryOf(s.notesMarkdown!),
+          ));
+        }
+        if (sources.isEmpty) {
+          throw ReviewFailed(
+              'The lessons this review covers are no longer in the library.');
+        }
+        final answers = await ask(
+          BatchStep.notes,
+          [LessonGenerator.reviewMessages(sources)],
+          temperature: LessonGenerator.notesTemperature,
+          label: (_) => 'Writing the review…',
+        );
+        final draft = LessonGenerator.parseReview(answers.single);
+        final heading = _firstHeading(draft.notes);
+        await repo.saveCards(id, draft.cards);
+        lesson = await update((l) => l.copyWith(
+              notesMarkdown: draft.notes,
+              material: [
+                '# Key summaries of the lessons reviewed',
+                for (final s in sources) '## ${s.title}\n\n${s.digest}',
+              ].join('\n\n'),
+              writtenBy: choice.label,
+              title: heading,
+              clearBatch: true,
+              clearPdf: true,
+            ));
+        _forget(id);
       } else if (!lesson.hasNotes) {
         lesson = await update((l) =>
             l.copyWith(stage: LessonStage.generatingNotes, clearError: true));
@@ -756,6 +1259,7 @@ class GenerationService {
         lesson = await update((l) => l.copyWith(
               notesMarkdown: draft.notes,
               checks: draft.checks,
+              writtenBy: choice.label,
               clearCheckReport: true,
               clearBatch: true,
               // Standalone lessons start with the raw request as title.
@@ -825,6 +1329,7 @@ class GenerationService {
           (settings.verifyProofs &&
                   !lesson.isBookChapter &&
                   !lesson.isRecap &&
+                  !lesson.isReview &&
                   lesson.segments.isEmpty
               ? const ProofReview(state: ProofReviewState.toVerify)
               : null);
@@ -864,8 +1369,8 @@ class GenerationService {
                 ),
               ],
               temperature: LessonGenerator.reviewTemperature,
-              model: settings.lessonModel,
-              effort: settings.lessonEffort == null ? null : 'medium',
+              model: choice.model,
+              effort: choice.effort == null ? null : 'medium',
               label: (_) => 'Weighing the reviewer\'s findings…',
             );
             final real = keepRealIssues(current.issues, answers.single);
@@ -989,11 +1494,46 @@ class GenerationService {
       }
 
       if (lesson.audioPath == null) {
-        lesson = await update((l) => l.copyWith(
+        await update((l) => l.copyWith(
             stage: LessonStage.synthesizingAudio, clearError: true));
+        throw const _RecordNext();
+      }
+
+      await update(
+          (l) => l.copyWith(stage: LessonStage.ready, clearError: true));
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Records the lecture of a lesson whose script is written (see
+  /// [_drainRecordings]).
+  Future<void> _record(String id) async {
+    if (_cancelled.contains(id)) throw const GenerationCancelled();
+    final settings = readSettings();
+    Future<Lesson> update(Lesson Function(Lesson) change) async {
+      final updated = await repo.updateLesson(id, change);
+      if (updated == null) throw const GenerationCancelled(); // deleted
+      return updated;
+    }
+
+    var lesson = await update((l) => l.copyWith(
+        stage: LessonStage.synthesizingAudio, clearError: true));
+    OpenRouterClient? client;
+    TtsEngine? engine;
+    try {
+      if (lesson.audioPath == null) {
         final custom = createEngine;
         if (custom != null) {
           engine = custom(settings);
+        } else if (settings.ttsBackend == TtsBackend.onDevice &&
+            filesAreBlobs) {
+          // In a browser: Kokoro, which downloads itself the first time.
+          engine = createKokoroWebEngine(
+            voice: settings.browserVoice,
+            onDownload: (f) => onProgress(
+                id, JobProgress('Downloading the voice (one time)…', f)),
+          );
         } else if (settings.ttsBackend == TtsBackend.onDevice) {
           final voice = VoiceModel.byId(settings.voiceModel);
           await installVoiceModel(
@@ -1012,8 +1552,9 @@ class GenerationService {
           engine = OnDeviceTtsEngine(
               manager: voices, model: voice, speakerId: settings.voiceSpeaker);
         } else {
+          if (!settings.hasApiKey) throw const MissingApiKey();
           engine = OpenRouterTtsEngine(
-            client: client,
+            client: client = _createClient(settings.apiKey),
             model: settings.openRouterTtsModel,
             voice: settings.openRouterTtsVoice,
           );
@@ -1052,7 +1593,7 @@ class GenerationService {
           (l) => l.copyWith(stage: LessonStage.ready, clearError: true));
     } finally {
       await engine?.dispose();
-      client.close();
+      client?.close();
     }
   }
 
@@ -1073,13 +1614,7 @@ class GenerationService {
     }
     if (!info.isTerminal) throw const _WaitingForBatch();
     _fetched[pending.id] = info;
-    if (!info.isDone) {
-      throw BatchFailed(switch (info.status) {
-        'expired' => 'The batch was not finished within its time limit.',
-        'cancelled' => 'The provider cancelled the batch.',
-        _ => info.error ?? 'The batch failed.',
-      });
-    }
+    if (!info.isDone) throw BatchFailed(_failureOf(info));
     final answers = <String>[];
     for (var i = 0; i < pending.parts; i++) {
       final result = info.results[PendingBatch.customId(lesson.id, i)];
@@ -1090,6 +1625,140 @@ class GenerationService {
       answers.add(text);
     }
     return answers;
+  }
+
+  /// Why a finished batch has no answers.
+  static String _failureOf(BatchInfo info) => switch (info.status) {
+        'expired' => 'The batch was not finished within its time limit.',
+        'cancelled' => 'The provider cancelled the batch.',
+        _ => info.error ?? 'The batch failed.',
+      };
+
+  // ----------------------------------------------------- quizzes for later
+
+  /// Orders a quiz on [lessonId] through the Batch API with the quiz model
+  /// of the settings: about half the price, answered within minutes to a
+  /// day. It is stored at once as waiting; [pollBatches] collects it and
+  /// tells the user. Returns the quiz id. Throws [OpenRouterException].
+  Future<String> orderQuiz(String lessonId, QuizRequest request) async {
+    final store = quizzes;
+    if (store == null) throw StateError('No quiz store.');
+    final settings = readSettings();
+    if (!settings.hasApiKey) {
+      throw OpenRouterException('Add your OpenRouter API key in Settings first.');
+    }
+    final lesson = await repo.getLesson(lessonId);
+    if (lesson == null || !lesson.hasNotes) {
+      throw OpenRouterException('This lesson has no notes yet.');
+    }
+    final choice = settings.quizModel;
+    final quizId = _uuid.v4();
+    final messages = QuizPrompts.quizMessages(
+      title: lesson.title,
+      notesMarkdown: lesson.studyText!,
+      difficulty: request.difficulty,
+      kind: request.kind,
+      count: request.count,
+      avoid: askedQuestions(await store.load(lessonId)),
+    );
+    final client = _createClient(settings.apiKey);
+    final BatchInfo batch;
+    try {
+      batch = await client.createBatch(
+        model: choice.model,
+        reasoningEffort: choice.effort,
+        requests: [
+          BatchRequest(
+              customId: PendingBatch.customId(quizId, 0), messages: messages),
+        ],
+      );
+    } finally {
+      client.close();
+    }
+    final now = DateTime.now();
+    await store.update(lessonId, (list) => [
+          Quiz(
+            id: quizId,
+            createdAt: now,
+            questions: const [],
+            difficulty: request.difficulty,
+            request: request,
+            batch: PendingBatch(
+                id: batch.id, step: BatchStep.quiz, submittedAt: now),
+          ),
+          ...list,
+        ]);
+    unawaited(notifications.requestPermission());
+    await _syncWaiting();
+    await _schedulePoll();
+    return quizId;
+  }
+
+  /// Stops waiting for an ordered quiz and removes it. The request itself
+  /// cannot be cancelled at OpenRouter.
+  Future<void> cancelQuiz(String lessonId, String quizId) async {
+    final store = quizzes;
+    if (store == null) return;
+    String? batchId;
+    await store.update(lessonId, (list) {
+      for (final q in list) {
+        if (q.id == quizId) batchId = q.batch?.id;
+      }
+      return [for (final q in list) if (q.id != quizId) q];
+    });
+    await _syncWaiting();
+    await _deleteIfUnused(batchId);
+  }
+
+  /// Stores the answer of a finished batch as the quiz's questions, or the
+  /// reason it has none, and tells the user.
+  Future<void> _collectQuiz(String lessonId, Quiz quiz, BatchInfo info) async {
+    final store = quizzes;
+    if (store == null) return;
+    String? error;
+    var questions = const <QuizQuestion>[];
+    if (!info.isDone) {
+      error = _failureOf(info);
+    } else {
+      final result = info.results[PendingBatch.customId(quiz.id, 0)];
+      final text = result?.text;
+      if (text == null) {
+        error = result?.error ?? 'The batch has no answer for this quiz.';
+      } else {
+        try {
+          questions = parseQuiz(text, shuffle: Random());
+        } on FormatException {
+          error = 'The model returned an unusable answer.';
+        }
+      }
+    }
+    var found = false;
+    await store.update(lessonId, (list) {
+      found = list.any((q) => q.id == quiz.id && q.isWaiting);
+      return [
+        for (final q in list)
+          if (q.id == quiz.id && q.isWaiting)
+            Quiz(
+              id: q.id,
+              createdAt: q.createdAt,
+              questions: questions,
+              difficulty: q.difficulty,
+              request: q.request,
+              error: error,
+            )
+          else
+            q,
+      ];
+    });
+    await _syncWaiting();
+    await _deleteIfUnused(info.id);
+    if (!found) return; // cancelled meanwhile
+    final title = (await repo.getLesson(lessonId))?.title ?? 'Lesson';
+    if (error == null) {
+      await notifications.quizReady(lessonId, title, questions.length);
+    } else {
+      await notifications.quizFailed(lessonId, title, error);
+    }
   }
 
   /// Batch ids whose answers were just collected, by lesson id.
@@ -1106,8 +1775,7 @@ class GenerationService {
   /// Best effort. A batch that is still running cannot be deleted.
   Future<void> _deleteIfUnused(String? batchId) async {
     if (batchId == null || !(_fetched[batchId]?.isTerminal ?? false)) return;
-    final shared =
-        (await _waitingLessons()).any((l) => l.batch!.id == batchId);
+    final shared = (await _waiters()).any((w) => w.batch.id == batchId);
     if (shared) return;
     _fetched.remove(batchId);
     // Its own client: the job's client is closed before this completes.
@@ -1171,11 +1839,33 @@ class GenerationService {
     if (course == null) return null;
     final lessons = await repo.getCourseLessons(courseId);
     final index = lessons.indexWhere((l) => l.id == lesson.id);
+    // A later part of a series: the earlier parts, and the summaries of the
+    // earlier lessons this one builds on.
+    final earlierParts = <({String title, List<String> lessons})>[];
+    final foundations = <({String title, String summary})>[];
+    if (course.seriesId != null) {
+      for (final c in await seriesOf(course.id)) {
+        if (c.part >= course.part) continue;
+        earlierParts.add((
+          title: c.title,
+          lessons: [for (final l in await repo.getCourseLessons(c.id)) l.title],
+        ));
+      }
+      for (final id in lesson.buildsOn) {
+        final l = await repo.getLesson(id);
+        if (l != null) {
+          foundations.add((title: l.title, summary: establishedBy(l)));
+        }
+      }
+    }
     return CourseContext(
       courseTitle: course.title,
       courseDescription: course.description,
       lessonTitles: [for (final l in lessons) l.title],
       lessonIndex: index < 0 ? 0 : index,
+      part: course.part,
+      earlierParts: earlierParts,
+      foundations: foundations,
     );
   }
 
@@ -1218,6 +1908,7 @@ class _Outgoing {
     required this.model,
     required this.effort,
     required this.temperature,
+    this.keys = const [],
   });
 
   final String lessonId;
@@ -1226,6 +1917,9 @@ class _Outgoing {
   final String model;
   final String? effort;
   final double temperature;
+
+  /// See [PendingBatch.keys].
+  final List<String> keys;
 
   /// Requests that can share a batch: same model and same sampling. The
   /// temperature only matters when no reasoning effort replaces it.
@@ -1237,9 +1931,23 @@ class _WaitingForBatch implements Exception {
   const _WaitingForBatch();
 }
 
+/// The lesson's script is written and its lecture is to be recorded: the
+/// job moves from the lesson queue to the recording queue.
+class _RecordNext implements Exception {
+  const _RecordNext();
+}
+
 /// A batch came back without a usable answer.
 class BatchFailed implements Exception {
   BatchFailed(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// A review could not be made.
+class ReviewFailed implements Exception {
+  ReviewFailed(this.message);
   final String message;
   @override
   String toString() => message;

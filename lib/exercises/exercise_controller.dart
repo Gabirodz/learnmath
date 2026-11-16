@@ -175,10 +175,10 @@ class ExerciseController extends Notifier<ExerciseState> {
 
       final reply = await ref.read(exerciseModelProvider)(
         apiKey: settings.apiKey,
-        model: settings.lessonModel,
+        model: settings.tutorModel.model,
         messages: messages,
         reasoningEffort:
-            kind == HelpKind.hint ? null : settings.lessonEffort,
+            kind == HelpKind.hint ? null : settings.tutorModel.effort,
         onDelta: (d) {
           if (_disposed || gen != _generation) return;
           _acc.write(d);

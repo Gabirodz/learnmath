@@ -41,6 +41,16 @@ Future<bool> confirmDelete(BuildContext context, {required String what}) async {
 
 /// Starts generation for [lessonId], or points the user to settings when no
 /// API key is configured.
+/// A way back to the library for a screen with nothing beneath it (one opened
+/// from a notification, say); null where the usual back arrow is shown.
+Widget? homeButtonIfRoot(BuildContext context) => Navigator.of(context).canPop()
+    ? null
+    : IconButton(
+        tooltip: 'Library',
+        icon: const Icon(Icons.home_outlined),
+        onPressed: () => context.go('/'),
+      );
+
 /// Whether [lesson] is a planned or failed lesson with nothing written yet,
 /// which an assistant outside the app can write.
 bool canWriteOutside(Lesson lesson) =>
@@ -48,7 +58,8 @@ bool canWriteOutside(Lesson lesson) =>
         lesson.stage == LessonStage.failed) &&
     !lesson.hasNotes &&
     !lesson.isBookChapter &&
-    !lesson.isRecap;
+    !lesson.isRecap &&
+    !lesson.isReview;
 
 void generateLesson(BuildContext context, WidgetRef ref, String lessonId,
     {bool? audio, Lesson? lesson}) {
@@ -108,7 +119,9 @@ class LessonTile extends ConsumerWidget {
 
     if (working) {
       subtitle = progress?.label ??
-          (lesson.isWaitingForBatch ? 'Waiting for the batch answer…' : 'Working…');
+          (lesson.isWaitingForBatch
+              ? GenerationService.waitingLabel(lesson)
+              : 'Working…');
       trailing = IconButton(
         tooltip: 'Cancel generation',
         icon: const Icon(Icons.close),
@@ -151,6 +164,12 @@ class LessonTile extends ConsumerWidget {
       // The voice model of the recording ("Piper Lessac").
       final voice = lesson.voice?.split(' · ').first;
       if (mins != null && voice != null) subtitle = '$subtitle · $voice';
+      // The model that wrote it ("GPT-6.1 Sol (batch)"), without the effort.
+      final writer = lesson.writtenBy?.split(' · ').first;
+      if (writer != null) {
+        subtitle = '$subtitle · $writer';
+        subtitleLines = 2;
+      }
       if (!lesson.hasAudio) {
         trailing = Icon(Icons.menu_book_outlined, color: scheme.onSurfaceVariant);
       } else if (lesson.completed) {

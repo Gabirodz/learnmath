@@ -15,7 +15,18 @@ abstract class AppNotifications {
   Future<void> lessonReady(String lessonId, String title,
       {required bool hasAudio});
 
+  /// Several lessons of one course finished: said once for the course
+  /// instead of once per lesson. [lessons] is how many became ready.
+  Future<void> courseReady(String courseId, String title, int lessons);
+
   Future<void> lessonFailed(String lessonId, String title, String reason);
+
+  /// A quiz ordered through the Batch API for the lesson [lessonTitle] has
+  /// arrived with [questions] questions.
+  Future<void> quizReady(String lessonId, String lessonTitle, int questions);
+
+  /// A quiz ordered through the Batch API could not be written.
+  Future<void> quizFailed(String lessonId, String lessonTitle, String reason);
 
   /// Shows or updates an ongoing progress notification. [key] identifies it
   /// (a lesson id, or [voiceModelKey]); [fraction] is 0..1 or null when
@@ -45,8 +56,19 @@ class NoNotifications implements AppNotifications {
       {required bool hasAudio}) async {}
 
   @override
+  Future<void> courseReady(String courseId, String title, int lessons) async {}
+
+  @override
   Future<void> lessonFailed(
       String lessonId, String title, String reason) async {}
+
+  @override
+  Future<void> quizReady(
+      String lessonId, String lessonTitle, int questions) async {}
+
+  @override
+  Future<void> quizFailed(
+      String lessonId, String lessonTitle, String reason) async {}
 
   @override
   Future<void> progress(String key,
@@ -65,21 +87,35 @@ class WaitingBatch {
     required this.batchId,
     required this.lessonId,
     required this.lessonTitle,
+    this.quizId,
   });
 
   final String batchId;
   final String lessonId;
   final String lessonTitle;
 
-  Map<String, Object?> toJson() =>
-      {'batchId': batchId, 'lessonId': lessonId, 'lessonTitle': lessonTitle};
+  /// Set when what waits is a quiz of the lesson, not the lesson itself.
+  final String? quizId;
+
+  bool get isQuiz => quizId != null;
+
+  Map<String, Object?> toJson() => {
+        'batchId': batchId,
+        'lessonId': lessonId,
+        'lessonTitle': lessonTitle,
+        if (quizId != null) 'quizId': quizId,
+      };
 
   static WaitingBatch? fromJson(Object? j) {
     if (j is! Map) return null;
     final b = j['batchId'], l = j['lessonId'], t = j['lessonTitle'];
     if (b is! String || l is! String) return null;
+    final q = j['quizId'];
     return WaitingBatch(
-        batchId: b, lessonId: l, lessonTitle: t is String ? t : 'Lesson');
+        batchId: b,
+        lessonId: l,
+        lessonTitle: t is String ? t : 'Lesson',
+        quizId: q is String ? q : null);
   }
 }
 

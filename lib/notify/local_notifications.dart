@@ -13,11 +13,22 @@ import 'notifications.dart';
 /// its exceptions, and on platforms without the plugin (tests on Linux) the
 /// methods do nothing.
 class LocalNotifications implements AppNotifications {
-  LocalNotifications({required this.onOpenLesson, required this.isForeground});
+  LocalNotifications({
+    required this.onOpenLesson,
+    required this.isForeground,
+    this.onOpenCourse,
+    this.onOpenQuiz,
+  });
 
   /// Called with the lesson id when the user taps a lesson notification while
   /// the app is running.
   final void Function(String lessonId) onOpenLesson;
+
+  /// The same for a course notification.
+  final void Function(String courseId)? onOpenCourse;
+
+  /// The same for a quiz notification: the lesson, on its Quiz tab.
+  final void Function(String lessonId)? onOpenQuiz;
 
   /// Whether the app is visible. The screen already shows what happened then,
   /// so nothing is posted.
@@ -26,9 +37,18 @@ class LocalNotifications implements AppNotifications {
   /// Set by [init] when the app was started by tapping a lesson notification.
   String? launchLessonId;
 
+  /// Set by [init] when the app was started by tapping a course notification.
+  String? launchCourseId;
+
+  /// Set by [init] when the app was started by tapping a quiz notification:
+  /// the lesson whose Quiz tab to open.
+  String? launchQuizLessonId;
+
   static const _lessonsChannel = 'lessons';
   static const _progressChannel = 'progress';
   static const _payloadPrefix = 'lesson:';
+  static const _coursePrefix = 'course:';
+  static const _quizPrefix = 'quiz:';
   static const _minProgressGap = Duration(milliseconds: 500);
 
   static bool get _supported =>
@@ -48,8 +68,10 @@ class LocalNotifications implements AppNotifications {
       await _setUp(_plugin, onTap: (r) => _handleTap(r.payload));
       final launch = await _plugin.getNotificationAppLaunchDetails();
       if (launch?.didNotificationLaunchApp ?? false) {
-        launchLessonId = lessonIdFromPayload(
-            launch?.notificationResponse?.payload);
+        final payload = launch?.notificationResponse?.payload;
+        launchLessonId = lessonIdFromPayload(payload);
+        launchCourseId = courseIdFromPayload(payload);
+        launchQuizLessonId = quizLessonIdFromPayload(payload);
       }
     } catch (e) {
       debugPrint('Notifications unavailable: $e');
@@ -59,6 +81,26 @@ class LocalNotifications implements AppNotifications {
   void _handleTap(String? payload) {
     final id = lessonIdFromPayload(payload);
     if (id != null) onOpenLesson(id);
+    final course = courseIdFromPayload(payload);
+    if (course != null) onOpenCourse?.call(course);
+    final quiz = quizLessonIdFromPayload(payload);
+    if (quiz != null) (onOpenQuiz ?? onOpenLesson)(quiz);
+  }
+
+  /// `quiz:<lesson id>` -> `<lesson id>`; null for anything else.
+  @visibleForTesting
+  static String? quizLessonIdFromPayload(String? payload) {
+    if (payload == null || !payload.startsWith(_quizPrefix)) return null;
+    final id = payload.substring(_quizPrefix.length);
+    return id.isEmpty ? null : id;
+  }
+
+  /// `course:<id>` -> `<id>`; null for anything else.
+  @visibleForTesting
+  static String? courseIdFromPayload(String? payload) {
+    if (payload == null || !payload.startsWith(_coursePrefix)) return null;
+    final id = payload.substring(_coursePrefix.length);
+    return id.isEmpty ? null : id;
   }
 
   /// `lesson:<id>` -> `<id>`; null for anything else.
@@ -141,8 +183,42 @@ class LocalNotifications implements AppNotifications {
           '$title is ready to ${hasAudio ? 'listen to' : 'read'}.');
 
   @override
+  Future<void> courseReady(String courseId, String title, int lessons) async {
+    if (!_supported || isForeground()) return;
+    try {
+      await _plugin.show(
+          id: stableId('course\u0000$courseId'),
+          title: 'Course ready',
+          body: '$title: $lessons lessons are ready to listen to.',
+          notificationDetails: _lessonDetails,
+          payload: '$_coursePrefix$courseId');
+    } catch (_) {}
+  }
+
+  @override
   Future<void> lessonFailed(String lessonId, String title, String reason) =>
       _showLesson(lessonId, 'Lesson failed', '$title: $reason');
+
+  Future<void> _showQuiz(String lessonId, String title, String body) async {
+    if (!_supported || isForeground()) return;
+    try {
+      await _plugin.show(
+          id: stableId('quiz\u0000$lessonId'),
+          title: title,
+          body: body,
+          notificationDetails: _lessonDetails,
+          payload: '$_quizPrefix$lessonId');
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> quizReady(String lessonId, String lessonTitle, int questions) =>
+      _showQuiz(lessonId, 'Quiz ready',
+          '$lessonTitle: your quiz of $questions questions is ready.');
+
+  @override
+  Future<void> quizFailed(String lessonId, String lessonTitle, String reason) =>
+      _showQuiz(lessonId, 'Quiz not written', '$lessonTitle: $reason');
 
   @override
   Future<void> progress(String key,
@@ -200,19 +276,54 @@ class LocalNotifications implements AppNotifications {
   }
 
   /// For the background check, which runs in its own isolate with no
-  /// [LocalNotifications] instance: tells the user a waiting batch finished.
-  static Future<void> showBatchArrived(WaitingBatch b) async {
-    if (!_supported) return;
+  /// [LocalNotifications] instance: tells the user that the batch the
+  /// lessons [waiting] share has finished. One notification per batch,
+  /// however many lessons are in it.
+  static Future<void> showBatchArrived(List<WaitingBatch> waiting) async {
+    if (!_supported || waiting.isEmpty) return;
+    final text = batchArrivedText(waiting);
     try {
       final plugin = FlutterLocalNotificationsPlugin();
       await _setUp(plugin);
       await plugin.show(
-          id: _lessonId(b.lessonId),
-          title: 'Your lesson is ready to continue',
-          body: '${b.lessonTitle}: the answer has arrived. '
-              'Open LearnMath to finish it.',
+          id: stableId('batch\u0000${waiting.first.batchId}'),
+          title: text.title,
+          body: text.body,
           notificationDetails: _lessonDetails,
-          payload: '$_payloadPrefix${b.lessonId}');
+          // A single lesson (or quiz) opens; several just open the app.
+          payload: waiting.length != 1
+              ? null
+              : waiting.single.isQuiz
+                  ? '$_quizPrefix${waiting.single.lessonId}'
+                  : '$_payloadPrefix${waiting.single.lessonId}');
     } catch (_) {}
+  }
+
+  /// The wording of [showBatchArrived]. An arrived answer is a step, not
+  /// the finished lesson (the script and the recording may still follow),
+  /// so it does not say "ready".
+  @visibleForTesting
+  static ({String title, String body}) batchArrivedText(
+      List<WaitingBatch> waiting) {
+    final n = waiting.length;
+    if (n == 1 && waiting.single.isQuiz) {
+      return (
+        title: 'A quiz has arrived',
+        body: '${waiting.single.lessonTitle}: the quiz you ordered is back '
+            'from the batch queue. Open LearnMath to take it.',
+      );
+    }
+    return n == 1
+        ? (
+            title: 'A lesson can continue',
+            body: '${waiting.single.lessonTitle}: its answer from the batch '
+                'queue has arrived. Open LearnMath to go on with it; it is '
+                'not finished yet.',
+          )
+        : (
+            title: '$n lessons can continue',
+            body: 'Their answers from the batch queue have arrived. Open '
+                'LearnMath to go on with them; they are not finished yet.',
+          );
   }
 }

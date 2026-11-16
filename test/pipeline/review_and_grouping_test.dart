@@ -83,7 +83,7 @@ void main() {
         expect(l.batch!.id, 'batch_1', reason: 'same batch id for all');
         expect(l.batch!.step, BatchStep.notes);
         expect(l.isWaitingForBatch, isTrue);
-        expect(env.lastLabel(id), 'Waiting for the batch answer…');
+        expect(env.lastLabel(id), startsWith('Waiting for the '));
       }
       expect(env.fake.chatBodies, isEmpty);
 
@@ -107,7 +107,9 @@ void main() {
         expect(l.hasAudio, isTrue);
         expect(l.batch, isNull);
       }
-      expect(env.notifications.ready.map((r) => r.id), ids);
+      // One notification for the course, not one per lesson.
+      expect(env.notifications.ready, isEmpty);
+      expect(env.notifications.courses.single.lessons, ids.length);
       expect(env.fake.submitted, hasLength(2));
       expect(env.fake.deleted.toSet(), {'batch_1', 'batch_2'});
     });
@@ -692,7 +694,8 @@ void main() {
       expect(l1.hasAudio, isTrue);
       expect(env.fake.chatBodies, isEmpty, reason: 'everything was batched');
       expect(env.fake.submitted, hasLength(7));
-      expect(env.notifications.ready.map((r) => r.id).toSet(), {'l1', 'l2'});
+      expect(env.notifications.ready, isEmpty);
+      expect(env.notifications.courses.single.lessons, 2);
       expect(env.notifications.failed, isEmpty);
       expect(env.keepAlive.distinct.last, 'release');
     });

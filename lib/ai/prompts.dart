@@ -51,6 +51,74 @@ Rules:
         '${topic.trim()}\n\n$count';
   }
 
+  // ----------------------------------------------------------- continuation
+
+  /// Appended to [outlineSystem] when planning a later part of a series.
+  static const String continuationAddendum = '''
+
+This course continues a series. The student has studied every earlier part; the request lists their lessons, numbered E1, E2, ..., each with what it established (definitions, results, notation). Plan the next part:
+- Build on the earlier parts and go further. Do not repeat their material: a lesson may recall a definition or result in a sentence, but its subject must be new.
+- Use the notation and conventions of the earlier parts.
+- After each BRIEF line add one line `ASSUMES: <numbers>` naming the earlier lessons whose results this lesson uses directly, by their E-numbers, at most four (for example `ASSUMES: E3, E7`), or `ASSUMES: none`.
+- The COURSE line is the title of this part alone, without a part number.''';
+
+  /// An earlier lesson as the planner of a later part sees it.
+  static String _earlierLesson(int number, String title, String summary) =>
+      'E$number. ${title.trim()}\n${summary.trim()}\n';
+
+  /// The request for the plan of part [part] of the series [seriesTitle].
+  /// [earlier] lists the earlier parts in order with their lessons; lesson
+  /// numbers run on across parts.
+  static String continuationUser({
+    required String seriesTitle,
+    required int part,
+    required List<
+            ({
+              String title,
+              String description,
+              List<({int number, String title, String summary})> lessons
+            })>
+        earlier,
+    String steer = '',
+    int? lessonCount,
+  }) {
+    final b = StringBuffer()
+      ..writeln('Plan part $part of the series "${seriesTitle.trim()}", a '
+          'graduate-level course that continues the parts below.');
+    if (steer.trim().isNotEmpty) {
+      b
+        ..writeln()
+        ..writeln('What the student wants this part to cover: ${steer.trim()}');
+    }
+    b
+      ..writeln()
+      ..writeln(lessonCount == null
+          ? 'Choose a sensible number of lessons, typically between 6 and 12.'
+          : 'Plan exactly $lessonCount lessons.');
+    for (var p = 0; p < earlier.length; p++) {
+      final e = earlier[p];
+      b
+        ..writeln()
+        ..writeln('=== PART ${p + 1}: ${e.title.trim()} ===');
+      if (e.description.trim().isNotEmpty) b.writeln(e.description.trim());
+      b.writeln();
+      for (final l in e.lessons) {
+        b.writeln(_earlierLesson(l.number, l.title, l.summary));
+      }
+    }
+    return b.toString().trimRight();
+  }
+
+  /// [continuationUser] as one self-contained prompt for an assistant
+  /// outside the app; the answer is read by `parseOutline`.
+  static String externalContinuation(String request) =>
+      '${outlineSystem.replaceFirst(', no code fences, nothing before or after', '')}'
+      '$continuationAddendum\n'
+      '- Put your whole answer in ONE code block, so that I can copy it '
+      'with its line structure. Write nothing before or after the code '
+      'block.\n\n'
+      '$request';
+
   // ------------------------------------------------------------------ notes
 
   static const String notesSystem =
@@ -72,6 +140,7 @@ Output rules:
 - Math: inline math with `$...$`, display math with `$$...$$` where the `$$` delimiters are on their own lines. Never use `\(...\)`, `\[...\]`, `\begin{equation}` or other environments outside `$$`.
 - Use only KaTeX-compatible LaTeX. No custom macros, no `\newcommand`, no `\def`, no tikz or other pictures, no `\usepackage`. Prefer standard commands (`\mathbb`, `\mathcal`, `\varepsilon`, `\to`, `\subseteq`, `\operatorname{...}`, `\begin{aligned}...\end{aligned}`, `\begin{cases}...\end{cases}`).
 - No HTML tags.
+- Display the formulas that matter, centred on their own lines with `$$...$$`: the defining condition in a definition, the conclusion of a theorem, lemma or proposition, an identity or estimate that is used later, the result of a computation, and the steps of a chain of equalities or inequalities in a proof (one relation per line in an `aligned` block). The sentence continues around the display. Keep inline `$...$` for short symbols and expressions within prose (a name such as $f$, a set such as $[a,b]$, a short condition such as $x > 0$); an inline formula longer than about 25 characters of LaTeX should usually be a display instead, since it is hard to read in running text on a phone.
 - Phone-friendly layout: keep each display equation short (roughly one line of 40 characters of source is ideal). Break long derivations into several display equations or an `aligned` block with one relation per line. Avoid wide tables and large matrices (at most 3x3); prefer lists.
 - Mark structure in bold at the start of a paragraph: **Definition.**, **Theorem.**, **Lemma.**, **Proposition.**, **Corollary.**, **Proof.**, **Example.**, **Remark.** Finish proofs with $\blacksquare$ on the last line. Give names to important results where they have them.
 
@@ -446,6 +515,72 @@ PAUSE: 1''';
       '<<<NOTES\n${notesMarkdown.trim()}\nNOTES>>>\n\n'
       'Now produce the script in the required SECTION/SAY/SHOW/PAUSE format only.';
 
+  // ----------------------------------------------------------------- review
+
+  /// Writes the key summary of one lesson, which reviews are made from in
+  /// place of its full notes.
+  static const String digestSystem = r"""
+You condense the lecture notes of one graduate mathematics lesson into a key summary. Later a review of several lessons (flashcards, a short lesson, quizzes) is written from this summary alone, without the notes, so it must contain the lesson's material itself, not a description of it.
+
+Include, in the order of the notes:
+- every definition, stated in full;
+- every theorem, lemma, proposition and corollary, stated in full with all its hypotheses and with its name if it has one;
+- for each proof, its key idea in one to three sentences: the construction or the decisive step, and where each hypothesis is used;
+- the main examples and counterexamples, each with what it shows;
+- the notation the lesson introduces, and the standard mistakes or misreadings the notes warn about.
+
+Leave out motivation, history, exercises and routine computations. Add nothing that is not in the notes and do not correct or generalise them.
+
+Format: Markdown with `##` headings only (no `#` title), short paragraphs and bullet lists. Math in KaTeX-compatible LaTeX, `$...$` inline and `$$...$$` display with the `$$` delimiters on their own lines. 300 to 700 words. Output only the summary: no preamble, no closing remark, no code fence.""";
+
+  static String digestUser({required String title, required String notesMarkdown}) =>
+      'Lesson: "${title.trim()}"\n\n'
+      'Lecture notes (between the markers):\n'
+      '<<<NOTES\n${notesMarkdown.trim()}\nNOTES>>>';
+
+  /// Writes the short lesson and the flashcards of a review of several
+  /// studied lessons, from their key summaries.
+  static const String reviewSystem = r"""
+You write a review for a graduate mathematics student who studied several lessons some time ago and wants to reinforce them. You are given the key summary of each lesson. The review has two parts in one answer: a short lesson, then flashcards.
+
+PART 1, the short lesson, a Markdown document:
+- Start with a single `#` title line of the form `# Review: <what the lessons are about, in a few words>`.
+- One `##` section per lesson, in the order given, titled with the lesson's title. In it, restate the lesson's central definitions and results precisely, each followed by the one idea that makes it memorable or the key step of its proof. Then one sentence on the mistake students most often make with it.
+- Where lessons build on each other, say so: a `## How it fits together` section at the end connects the results across lessons (what is used where, what generalises what).
+- This is reinforcement, not re-teaching and not new material: use only what is in the summaries, with their notation. No proofs in full, no exercises.
+- Math: inline `$...$`, display `$$...$$` with the `$$` delimiters on their own lines; KaTeX-compatible LaTeX only; keep display equations short for a phone screen. Mark **Definition.**, **Theorem.** and so on in bold as the summaries do. No HTML.
+- Length: about 150 to 250 words per lesson, and never more than 1800 words in total.
+
+PART 2, the flashcards, after the document, in a block that starts with a line `<<<CARDS` and ends with a line `CARDS>>>`. Each card is
+
+FRONT: <a question the student answers from memory>
+BACK: <the answer, one to three sentences>
+TOPIC: <the title of the lesson it comes from, exactly as given>
+
+with a blank line between cards. Rules for the cards:
+- Four to six cards per lesson, at most 60 in total, covering every lesson. One fact per card.
+- Vary them: state a definition; state a theorem with its hypotheses; which hypothesis fails in a given counterexample; the key idea of a proof; true or false with the reason; what a notation means.
+- The front names what it asks about and is answerable without seeing the notes ("State the dominated convergence theorem.", not "State Theorem 2."). The back is complete and precise enough to check an answer against.
+- Each field stays on one line. Math is inline LaTeX in `$...$` only; no display math and no Markdown lists in cards.
+
+Output only the document followed by the cards block: no preamble, no closing remark, no code fence around the document, and nothing after `CARDS>>>`.""";
+
+  static String reviewUser(List<({String title, String digest})> lessons) {
+    final b = StringBuffer()
+      ..writeln('The student has studied these ${lessons.length} '
+          '${lessons.length == 1 ? 'lesson' : 'lessons'}, in this order. '
+          'Write the review.')
+      ..writeln();
+    for (var i = 0; i < lessons.length; i++) {
+      b
+        ..writeln('=== LESSON ${i + 1}: ${lessons[i].title.trim()} ===')
+        ..writeln(lessons[i].digest.trim())
+        ..writeln('=== END OF LESSON ${i + 1} ===')
+        ..writeln();
+    }
+    return b.toString().trimRight();
+  }
+
   // ---------------------------------------------------------- transcription
 
   static const String transcribeSystem = r"""
@@ -492,6 +627,27 @@ Rules:
     final b = StringBuffer()
       ..writeln()
       ..writeln('This lesson is part of a course: "${c.courseTitle}".');
+    if (c.earlierParts.isNotEmpty) {
+      b.writeln('The course is part ${c.part} of a series. The student has '
+          'studied the earlier parts: build on them, keep their notation, '
+          'and do not re-derive their results.');
+      for (var p = 0; p < c.earlierParts.length; p++) {
+        final e = c.earlierParts[p];
+        b.writeln('Part ${p + 1}, "${e.title}": ${e.lessons.join('; ')}.');
+      }
+      if (!forNarration && c.foundations.isNotEmpty) {
+        b.writeln('Key summaries of the earlier lessons this lesson builds '
+            'on (recall what is needed in a sentence or two; do not repeat '
+            'them):');
+        for (final f in c.foundations) {
+          b
+            ..writeln()
+            ..writeln('### ${f.title}')
+            ..writeln(f.summary.trim());
+        }
+        b.writeln();
+      }
+    }
     if (c.courseDescription.trim().isNotEmpty) {
       b.writeln('Course description: ${c.courseDescription.trim()}');
     }

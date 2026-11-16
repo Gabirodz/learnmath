@@ -312,4 +312,119 @@ void main() {
       expect(s.autoPlayNext, isTrue);
     });
   });
+
+  group('model choices', () {
+    const sol = 'openai/gpt-6.1-sol';
+    const terra = 'openai/gpt-6.1-terra';
+    const luna = 'openai/gpt-6-luna';
+
+    test('Sol, Terra and Luna are all offered through the batch API', () {
+      expect([for (final p in LessonModelPreset.all) p.label], [
+        'GPT-6.1 Sol (batch)',
+        'GPT-6.1 Terra (batch)',
+        'GPT-6 Luna (batch)',
+        'GPT-6 Luna (immediate)',
+      ]);
+      expect(LessonModelPreset.lunaBatch.model, luna);
+      expect(LessonModelPreset.lunaBatch.batch, isTrue);
+      expect(LessonModelPreset.lunaBatch.effort, recommendedEffort);
+      expect([for (final p in LessonModelPreset.immediate) p.name],
+          ['GPT-6.1 Sol', 'GPT-6.1 Terra', 'GPT-6 Luna']);
+    });
+
+    test('matching tells the two Luna presets apart by batch', () {
+      expect(LessonModelPreset.matching(luna, batch: true)!.id, 'luna-batch');
+      expect(LessonModelPreset.matching(luna, batch: false)!.id, 'luna');
+      expect(LessonModelPreset.matching(sol, batch: false), isNull);
+      expect(LessonModelPreset.matching(sol)!.id, 'sol-batch');
+      expect(LessonModelPreset.matching('acme/m'), isNull);
+    });
+
+    test('lessonChoice is what the preset fields say', () {
+      expect(const AppSettings().lessonChoice,
+          const ModelChoice(model: sol, effort: 'high', batch: true));
+      expect(const AppSettings(lessonPreset: 'luna').lessonChoice,
+          const ModelChoice(model: luna));
+    });
+
+    test('withLessonChoice remembers a preset, its effort, or a custom model',
+        () {
+      const s = AppSettings();
+      for (final c in const [
+        ModelChoice(model: terra, effort: 'high', batch: true),
+        ModelChoice(model: luna, effort: 'xhigh', batch: true),
+        ModelChoice(model: luna),
+        ModelChoice(model: sol, batch: true),
+        ModelChoice(model: 'acme/m', effort: 'low', batch: true),
+        ModelChoice(model: 'acme/m'),
+        // Sol asked right away is no preset: kept as a custom model.
+        ModelChoice(model: sol, effort: 'high'),
+      ]) {
+        final back = AppSettings.fromJson(s.withLessonChoice(c).toJson());
+        expect(back.lessonChoice, c, reason: c.label);
+      }
+      expect(
+          s
+              .withLessonChoice(
+                  const ModelChoice(model: luna, effort: 'high', batch: true))
+              .lessonPreset,
+          'luna-batch');
+      expect(s.withLessonChoice(const ModelChoice(model: 'acme/m')).lessonPreset,
+          LessonModelPreset.customId);
+    });
+
+    test('chat and quiz follow the lesson model at high effort until picked',
+        () {
+      const s = AppSettings(lessonPreset: 'terra-batch', presetEffort: 'low');
+      expect(s.tutorModel, const ModelChoice(model: terra, effort: 'high'));
+      expect(s.quizModel, const ModelChoice(model: terra, effort: 'high'));
+
+      final picked = s.copyWith(
+        tutorChoice: const ModelChoice(model: luna, effort: 'medium'),
+        quizChoice: const ModelChoice(model: 'acme/q'),
+      );
+      expect(picked.tutorModel, const ModelChoice(model: luna, effort: 'medium'));
+      expect(picked.quizModel, const ModelChoice(model: 'acme/q'));
+      // Picking them does not change what lessons are written with.
+      expect(picked.lessonChoice, s.lessonChoice);
+    });
+
+    test('chat and quiz are never batched', () {
+      final s = const AppSettings().copyWith(
+        tutorChoice: const ModelChoice(model: sol, effort: 'high', batch: true),
+        quizChoice: const ModelChoice(model: sol, batch: true),
+      );
+      expect(s.tutorModel.batch, isFalse);
+      expect(s.quizModel.batch, isFalse);
+      expect(s.tutorModel.model, sol);
+    });
+
+    test('the choices survive JSON; junk is dropped', () {
+      final s = const AppSettings().copyWith(
+        tutorChoice: const ModelChoice(model: luna, effort: 'medium'),
+        quizChoice: const ModelChoice(model: 'acme/q'),
+      );
+      final back = AppSettings.fromJson(s.toJson());
+      expect(back.tutorChoice, s.tutorChoice);
+      expect(back.quizChoice, s.quizChoice);
+      expect(AppSettings.fromJson(const AppSettings().toJson()).tutorChoice,
+          isNull);
+      expect(AppSettings.fromJson({'tutorChoice': 'x'}).tutorChoice, isNull);
+      expect(AppSettings.fromJson({'quizChoice': {'model': ' '}}).quizChoice,
+          isNull);
+      expect(
+          AppSettings.fromJson({
+            'quizChoice': {'model': 'acme/q', 'effort': 'ludicrous'}
+          }).quizChoice,
+          const ModelChoice(model: 'acme/q'));
+    });
+
+    test('label names the model, how it is called and the effort', () {
+      expect(const ModelChoice(model: sol, effort: 'high', batch: true).label,
+          'GPT-6.1 Sol (batch) · high');
+      expect(const ModelChoice(model: luna).label, 'GPT-6 Luna');
+      expect(const ModelChoice(model: 'acme/m', batch: true).label,
+          'acme/m (batch)');
+    });
+  });
 }

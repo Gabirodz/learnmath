@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -94,27 +95,64 @@ class QuizController extends Notifier<QuizState> {
 
   @override
   QuizState build() {
-    ref.onDispose(() => _disposed = true);
-    _load();
+    // The store is the truth: a quiz ordered through the Batch API is
+    // stored by the pipeline when its answer arrives.
+    final sub = _store.watch(lessonId).listen((quizzes) {
+      if (!_disposed) state = state.copyWith(quizzes: quizzes, loaded: true);
+    });
+    ref.onDispose(() {
+      _disposed = true;
+      unawaited(sub.cancel());
+    });
     return const QuizState();
   }
 
-  Future<void> _load() async {
-    final quizzes = await _store.load(lessonId);
-    if (_disposed) return;
-    state = state.copyWith(quizzes: quizzes, loaded: true);
-  }
-
-  Future<void> _save(List<Quiz> quizzes) async {
-    state = state.copyWith(quizzes: quizzes);
-    await _store.save(lessonId, quizzes);
+  /// Applies [change] to the stored quizzes (and at once to the state).
+  Future<void> _update(List<Quiz> Function(List<Quiz>) change) async {
+    state = state.copyWith(quizzes: change(state.quizzes));
+    await _store.update(lessonId, change);
   }
 
   /// Questions of earlier quizzes, so a new one asks something else.
-  List<String> get asked => [
-        for (final quiz in state.quizzes.take(4))
-          for (final q in quiz.questions) q.prompt,
-      ];
+  List<String> get asked => askedQuestions(state.quizzes);
+
+  /// Orders a quiz through the Batch API: about half the price, answered
+  /// within minutes to a day. Returns false (with [QuizState.error]) when
+  /// it could not be ordered.
+  Future<bool> order({
+    required QuizDifficulty difficulty,
+    required QuizKind kind,
+    required int count,
+  }) async {
+    if (state.writing) return false;
+    state = state.copyWith(writing: true, clearError: true);
+    try {
+      await ref.read(generationProvider).orderQuiz(lessonId,
+          QuizRequest(difficulty: difficulty, kind: kind, count: count));
+      if (!_disposed) state = state.copyWith(writing: false);
+      return true;
+    } catch (e) {
+      if (!_disposed) {
+        state = state.copyWith(writing: false, error: _describe(e));
+      }
+      return false;
+    }
+  }
+
+  /// Stops waiting for an ordered quiz and removes it.
+  Future<void> cancelOrder(String quizId) =>
+      ref.read(generationProvider).cancelQuiz(lessonId, quizId);
+
+  /// Orders a failed quiz again, with what was asked for the first time.
+  Future<void> retryOrder(String quizId) async {
+    final request = state.byId(quizId)?.request;
+    if (request == null) return;
+    await delete(quizId);
+    await order(
+        difficulty: request.difficulty,
+        kind: request.kind,
+        count: request.count);
+  }
 
   static String _describe(Object e) => e is OpenRouterException
       ? e.message
@@ -122,7 +160,7 @@ class QuizController extends Notifier<QuizState> {
           ? 'The model returned an unusable answer. Please try again.'
           : 'Something went wrong. Please try again. ($e)';
 
-  /// Has the lesson model write a quiz. Returns its id, or null on failure
+  /// Has the quiz model write a quiz. Returns its id, or null on failure
   /// (then [QuizState.error] says why).
   Future<String?> generate({
     required QuizDifficulty difficulty,
@@ -144,16 +182,16 @@ class QuizController extends Notifier<QuizState> {
       }
       final reply = await ref.read(quizModelProvider)(
         apiKey: settings.apiKey,
-        model: settings.lessonModel,
+        model: settings.quizModel.model,
         messages: QuizPrompts.quizMessages(
           title: lesson.title,
-          notesMarkdown: lesson.notesMarkdown!,
+          notesMarkdown: lesson.studyText!,
           difficulty: difficulty,
           kind: kind,
           count: count,
           avoid: asked,
         ),
-        reasoningEffort: settings.lessonEffort,
+        reasoningEffort: settings.quizModel.effort,
         onDelta: (_) {},
       );
       if (_disposed) return null;
@@ -181,17 +219,18 @@ class QuizController extends Notifier<QuizState> {
       imported: imported,
       questions: parseQuiz(raw, shuffle: ref.read(quizShuffleProvider)),
     );
-    await _save([quiz, ...state.quizzes]);
+    await _update((list) => [quiz, ...list]);
     return quiz.id;
   }
 
   Future<void> delete(String quizId) =>
-      _save([for (final q in state.quizzes) if (q.id != quizId) q]);
+      _update((list) => [for (final q in list) if (q.id != quizId) q]);
 
-  Future<void> _put(String quizId, int index, QuizQuestion q) => _save([
-        for (final quiz in state.quizzes)
-          quiz.id == quizId ? quiz.withQuestion(index, q) : quiz,
-      ]);
+  Future<void> _put(String quizId, int index, QuizQuestion q) =>
+      _update((list) => [
+            for (final quiz in list)
+              quiz.id == quizId ? quiz.withQuestion(index, q) : quiz,
+          ]);
 
   /// Answers a multiple-choice question; the first tap counts.
   Future<void> choose(String quizId, int index, int option) async {
@@ -207,7 +246,7 @@ class QuizController extends Notifier<QuizState> {
     );
   }
 
-  /// Has the lesson model judge a typed answer against the lesson.
+  /// Has the quiz model judge a typed answer against the lesson.
   Future<void> grade(String quizId, int index, String reply) async {
     final q = state.byId(quizId)?.questions[index];
     if (q == null || q.isChoice || q.answered || state.grading != null) return;
@@ -220,14 +259,14 @@ class QuizController extends Notifier<QuizState> {
       final lesson = await ref.read(repositoryProvider).getLesson(lessonId);
       final answer = await ref.read(quizModelProvider)(
         apiKey: settings.apiKey,
-        model: settings.lessonModel,
+        model: settings.quizModel.model,
         messages: QuizPrompts.gradeMessages(
           title: lesson?.title ?? '',
-          notesMarkdown: lesson?.notesMarkdown ?? '',
+          notesMarkdown: lesson?.studyText ?? '',
           question: q,
           reply: reply,
         ),
-        reasoningEffort: settings.lessonEffort == null ? null : 'medium',
+        reasoningEffort: settings.quizModel.effort == null ? null : 'medium',
         onDelta: (_) {},
       );
       if (_disposed) return;

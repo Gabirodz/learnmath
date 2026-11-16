@@ -93,7 +93,20 @@ class NarrationSegment {
 }
 
 /// Which model request of the pipeline a batch carries.
-enum BatchStep { notes, repair, verify, judge, proofRepair, narration }
+enum BatchStep {
+  /// Key summaries of the lessons a review covers.
+  digest,
+  notes,
+  repair,
+  verify,
+  judge,
+  proofRepair,
+  narration,
+
+  /// A quiz ordered through the Batch API (stored with the quiz, not a
+  /// lesson).
+  quiz,
+}
 
 /// A request submitted to OpenRouter's Batch API whose answer has not been
 /// collected yet. Stored with the lesson so waiting survives app restarts.
@@ -103,6 +116,7 @@ class PendingBatch {
     required this.step,
     required this.submittedAt,
     this.parts = 1,
+    this.keys = const [],
   });
 
   /// OpenRouter batch id.
@@ -114,6 +128,10 @@ class PendingBatch {
   /// narrated in several parts). Their custom ids are `<lesson id>:<index>`.
   final int parts;
 
+  /// What each request is about, in order, when that is not the lesson
+  /// itself: for [BatchStep.digest], the ids of the lessons summarised.
+  final List<String> keys;
+
   static String customId(String lessonId, int part) => '$lessonId:$part';
 
   Map<String, Object?> toJson() => {
@@ -121,6 +139,7 @@ class PendingBatch {
         'step': step.name,
         'submittedAt': submittedAt.millisecondsSinceEpoch,
         'parts': parts,
+        if (keys.isNotEmpty) 'keys': keys,
       };
 
   static PendingBatch? fromJson(Object? j) {
@@ -134,6 +153,7 @@ class PendingBatch {
       submittedAt: DateTime.fromMillisecondsSinceEpoch(
           (j['submittedAt'] as num?)?.toInt() ?? 0),
       parts: (j['parts'] as num?)?.toInt() ?? 1,
+      keys: [for (final k in (j['keys'] as List? ?? const [])) '$k'],
     );
   }
 }
@@ -167,6 +187,12 @@ class Lesson {
     this.recapOf,
     this.recapMade = false,
     this.exerciseHelp = const [],
+    this.model,
+    this.writtenBy,
+    this.covers = const [],
+    this.digest,
+    this.material,
+    this.buildsOn = const [],
   });
 
   final String id;
@@ -239,6 +265,40 @@ class Lesson {
   /// Hints and solutions asked for so far.
   final List<ExerciseHelp> exerciseHelp;
 
+  /// The model chosen for this lesson when it was created; null for lessons
+  /// from before the choice was made per lesson (they use the last choice).
+  final ModelChoice? model;
+
+  /// The model that wrote the notes, as shown to the student
+  /// ("GPT-6.1 Sol (batch) · high"). Null when unknown or written elsewhere.
+  final String? writtenBy;
+
+  /// For a review of studied lessons: the ids of the lessons it covers.
+  final List<String> covers;
+
+  /// Key summary of the notes (definitions, statements, proof ideas), made
+  /// the first time a review covers this lesson and reused after that.
+  final String? digest;
+
+  /// For a review: the key summaries of the lessons it covers, which its
+  /// chat and quizzes draw on besides its own short notes.
+  final String? material;
+
+  /// For a lesson of a later part of a series: ids of the lessons of
+  /// earlier parts it builds on, as the planner named them. Their key
+  /// summaries go with the request that writes it.
+  final List<String> buildsOn;
+
+  /// A review of several studied lessons: cards, a short lesson and quizzes.
+  bool get isReview => covers.isNotEmpty;
+
+  /// What the tutor chat and the quizzes are given to work from.
+  String? get studyText {
+    final extra = material;
+    if (extra == null || extra.isEmpty) return notesMarkdown;
+    return '${notesMarkdown ?? ''}\n\n$extra'.trim();
+  }
+
   bool get isRecap => recapOf != null;
   bool get isWaitingForBatch => batch != null;
   bool get isBookChapter => sourceStartPage != null;
@@ -266,6 +326,10 @@ class Lesson {
     DateTime? completedAt,
     bool? recapMade,
     List<ExerciseHelp>? exerciseHelp,
+    ModelChoice? model,
+    String? writtenBy,
+    String? digest,
+    String? material,
     bool clearError = false,
     bool clearAudio = false,
     bool clearPdf = false,
@@ -302,6 +366,12 @@ class Lesson {
         recapOf: recapOf,
         recapMade: recapMade ?? this.recapMade,
         exerciseHelp: exerciseHelp ?? this.exerciseHelp,
+        model: model ?? this.model,
+        writtenBy: writtenBy ?? this.writtenBy,
+        covers: covers,
+        digest: digest ?? this.digest,
+        material: material ?? this.material,
+        buildsOn: buildsOn,
       );
 
   Map<String, Object?> toJson() => {
@@ -332,6 +402,12 @@ class Lesson {
         'recapOf': recapOf,
         'recapMade': recapMade,
         'exerciseHelp': [for (final h in exerciseHelp) h.toJson()],
+        'model': model?.toJson(),
+        'writtenBy': writtenBy,
+        if (covers.isNotEmpty) 'covers': covers,
+        'digest': digest,
+        'material': material,
+        if (buildsOn.isNotEmpty) 'buildsOn': buildsOn,
       };
 
   factory Lesson.fromJson(Map<String, Object?> j) => Lesson(
@@ -378,6 +454,12 @@ class Lesson {
           for (final h in (j['exerciseHelp'] as List? ?? const []))
             ExerciseHelp.fromJson((h as Map).cast<String, Object?>()),
         ],
+        model: ModelChoice.fromJson(j['model']),
+        writtenBy: j['writtenBy'] as String?,
+        covers: [for (final c in (j['covers'] as List? ?? const [])) '$c'],
+        digest: j['digest'] as String?,
+        material: j['material'] as String?,
+        buildsOn: [for (final b in (j['buildsOn'] as List? ?? const [])) '$b'],
       );
 }
 
@@ -389,12 +471,29 @@ class Course {
     required this.createdAt,
     this.bookPath,
     this.bookPageCount,
+    this.continues,
+    this.seriesId,
+    this.part = 1,
   });
 
   final String id;
   final String title;
   final String description;
   final DateTime createdAt;
+
+  /// The course this one continues (the previous part of a series).
+  final String? continues;
+
+  /// The first part of the series this course belongs to; null for a
+  /// first part (see [series]).
+  final String? seriesId;
+
+  /// 1 for a course of its own or the first part; 2, 3, ... for the parts
+  /// that continue it.
+  final int part;
+
+  /// Id shared by every part of the series.
+  String get series => seriesId ?? id;
 
   /// For an imported book: absolute path of the app's copy of the PDF.
   final String? bookPath;
@@ -409,6 +508,9 @@ class Course {
         'createdAt': createdAt.millisecondsSinceEpoch,
         'bookPath': bookPath,
         'bookPageCount': bookPageCount,
+        if (continues != null) 'continues': continues,
+        if (seriesId != null) 'seriesId': seriesId,
+        if (part != 1) 'part': part,
       };
 
   factory Course.fromJson(Map<String, Object?> j) => Course(
@@ -419,6 +521,9 @@ class Course {
             (j['createdAt'] as num).toInt()),
         bookPath: j['bookPath'] as String?,
         bookPageCount: (j['bookPageCount'] as num?)?.toInt(),
+        continues: j['continues'] as String?,
+        seriesId: j['seriesId'] as String?,
+        part: (j['part'] as num?)?.toInt() ?? 1,
       );
 }
 
@@ -436,11 +541,16 @@ class CourseOutline {
 }
 
 class OutlineLesson {
-  const OutlineLesson({required this.title, required this.brief});
+  const OutlineLesson(
+      {required this.title, required this.brief, this.assumes = const []});
   final String title;
 
   /// 1-3 sentences on what the lesson covers.
   final String brief;
+
+  /// In the plan of a later part: the numbers (1-based, across all earlier
+  /// parts) of the earlier lessons this one builds on.
+  final List<int> assumes;
 }
 
 /// Context handed to the generator when a lesson belongs to a course, so
@@ -451,7 +561,20 @@ class CourseContext {
     required this.courseDescription,
     required this.lessonTitles,
     required this.lessonIndex,
+    this.part = 1,
+    this.earlierParts = const [],
+    this.foundations = const [],
   });
+
+  /// Part of its series (1 for a course of its own).
+  final int part;
+
+  /// For a later part: the earlier parts in order, with their lesson
+  /// titles. The student knows all of them.
+  final List<({String title, List<String> lessons})> earlierParts;
+
+  /// The key summaries of the earlier lessons this lesson builds on.
+  final List<({String title, String summary})> foundations;
 
   final String courseTitle;
   final String courseDescription;
@@ -478,10 +601,11 @@ enum TtsBackend {
 /// How pages of an imported book are turned into Markdown + LaTeX.
 enum TranscriptionBackend { openRouterVision, mathpix }
 
-/// A ready-made choice of lesson model in Settings.
+/// A ready-made choice of model, offered wherever a model is picked.
 class LessonModelPreset {
   const LessonModelPreset({
     required this.id,
+    required this.name,
     required this.label,
     required this.model,
     required this.batch,
@@ -490,6 +614,11 @@ class LessonModelPreset {
   });
 
   final String id;
+
+  /// The model's name on its own ("GPT-6.1 Sol").
+  final String name;
+
+  /// [name] with how it is called ("GPT-6.1 Sol (batch)").
   final String label;
 
   /// OpenRouter model slug.
@@ -506,6 +635,7 @@ class LessonModelPreset {
 
   static const solBatch = LessonModelPreset(
     id: 'sol-batch',
+    name: 'GPT-6.1 Sol',
     label: 'GPT-6.1 Sol (batch)',
     model: 'openai/gpt-6.1-sol',
     batch: true,
@@ -517,6 +647,7 @@ class LessonModelPreset {
 
   static const terraBatch = LessonModelPreset(
     id: 'terra-batch',
+    name: 'GPT-6.1 Terra',
     label: 'GPT-6.1 Terra (batch)',
     model: 'openai/gpt-6.1-terra',
     batch: true,
@@ -525,17 +656,35 @@ class LessonModelPreset {
         'About half the cost of Sol and slightly less accurate. Batch API.',
   );
 
+  static const lunaBatch = LessonModelPreset(
+    id: 'luna-batch',
+    name: 'GPT-6 Luna',
+    label: 'GPT-6 Luna (batch)',
+    model: 'openai/gpt-6-luna',
+    batch: true,
+    effort: 'high',
+    description:
+        'Cheapest. Batch API: ready in minutes to hours. More mistakes in '
+        'proofs than Sol or Terra.',
+  );
+
   static const luna = LessonModelPreset(
     id: 'luna',
-    label: 'GPT-6 Luna',
+    name: 'GPT-6 Luna',
+    label: 'GPT-6 Luna (immediate)',
     model: 'openai/gpt-6-luna',
     batch: false,
     description:
-        'Cheapest and immediate, written while you wait. More mistakes in '
-        'proofs.',
+        'Cheap and immediate, written while you wait, at full price. More '
+        'mistakes in proofs.',
   );
 
-  static const all = [solBatch, terraBatch, luna];
+  /// Offered where the answer can wait (lessons, reviews).
+  static const all = [solBatch, terraBatch, lunaBatch, luna];
+
+  /// The same models where the student waits for the answer (chat, quizzes),
+  /// which the Batch API cannot serve.
+  static const immediate = [solBatch, terraBatch, lunaBatch];
 
   /// Id of the "Custom model" choice, which uses [AppSettings.chatModel].
   static const customId = 'custom';
@@ -546,9 +695,72 @@ class LessonModelPreset {
     }
     return null;
   }
+
+  /// The preset for [model]; with [batch], the one called that way too.
+  static LessonModelPreset? matching(String model, {bool? batch}) {
+    for (final p in all) {
+      if (p.model == model && (batch == null || p.batch == batch)) return p;
+    }
+    return null;
+  }
 }
 
-/// `reasoning.effort` values offered for the lesson model ('' = the model's
+/// The model one kind of request goes to, and how.
+class ModelChoice {
+  const ModelChoice({required this.model, this.effort, this.batch = false});
+
+  /// OpenRouter model slug.
+  final String model;
+
+  /// `reasoning.effort`, or null for the model's default.
+  final String? effort;
+
+  /// Whether requests go through the Batch API. Only lessons and reviews
+  /// can wait for that.
+  final bool batch;
+
+  /// As shown to the student: "GPT-6.1 Sol (batch) · high".
+  String get label {
+    final name = LessonModelPreset.matching(model)?.name ?? model;
+    return '$name${batch ? ' (batch)' : ''}'
+        '${effort == null ? '' : ' · $effort'}';
+  }
+
+  /// The same model asked right away.
+  ModelChoice get immediate =>
+      batch ? ModelChoice(model: model, effort: effort) : this;
+
+  Map<String, Object?> toJson() =>
+      {'model': model, 'effort': effort, 'batch': batch};
+
+  static ModelChoice? fromJson(Object? j) {
+    if (j is! Map) return null;
+    final model = j['model'];
+    if (model is! String || model.trim().isEmpty) return null;
+    final effort = j['effort'];
+    return ModelChoice(
+      model: model,
+      effort: effort is String &&
+              effort.isNotEmpty &&
+              reasoningEfforts.contains(effort)
+          ? effort
+          : null,
+      batch: j['batch'] as bool? ?? false,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is ModelChoice &&
+      other.model == model &&
+      other.effort == effort &&
+      other.batch == batch;
+
+  @override
+  int get hashCode => Object.hash(model, effort, batch);
+}
+
+/// `reasoning.effort` values offered wherever a model is picked ('' = the model's
 /// own default), lowest first. OpenRouter maps a level a model does not
 /// have to the nearest one it has.
 const reasoningEfforts = [
@@ -561,8 +773,8 @@ const reasoningEfforts = [
   'max',
 ];
 
-/// The effort lessons are best written with: enough thinking to get proofs
-/// right, without the cost of the levels above it.
+/// The effort recommended everywhere: enough thinking to get proofs right,
+/// without the cost of the levels above it.
 const recommendedEffort = 'high';
 
 class AppSettings {
@@ -573,6 +785,9 @@ class AppSettings {
     this.customBatch = false,
     this.customEffort = '',
     this.presetEffort,
+    this.tutorChoice,
+    this.quizChoice,
+    this.plannerChoice,
     this.mathChecks = true,
     this.verifyProofs = false,
     this.verifierModel = defaultVerifierModel,
@@ -583,6 +798,7 @@ class AppSettings {
     this.ttsBackend = TtsBackend.onDevice,
     this.voiceModel = defaultVoiceModel,
     this.voiceSpeaker = 0,
+    this.browserVoice = 'af_heart',
     this.openRouterTtsModel = 'heygen/heygen-voice-1-turbo',
     this.openRouterTtsVoice = 'gareth',
     this.pauseScale = 1.0,
@@ -619,6 +835,16 @@ class AppSettings {
   /// model's default), or null to use the preset's own.
   final String? presetEffort;
 
+  /// The model picked in the tutor chat; null until one is picked.
+  final ModelChoice? tutorChoice;
+
+  /// The model that plans courses (and later parts), chosen apart from the
+  /// one that writes their lessons; null for [plannerModel]'s default.
+  final ModelChoice? plannerChoice;
+
+  /// The model picked for writing and grading quizzes; null until then.
+  final ModelChoice? quizChoice;
+
   /// Whether lessons carry SymPy checks that are run on this device.
   final bool mathChecks;
 
@@ -651,6 +877,10 @@ class AppSettings {
 
   /// Speaker id within [voiceModel].
   final int voiceSpeaker;
+
+  /// The Kokoro voice used in a browser, where the on-device voice is
+  /// kokoro-js (see `kokoroVoices` in `lib/tts`).
+  final String browserVoice;
   final String openRouterTtsModel;
   final String openRouterTtsVoice;
 
@@ -676,14 +906,55 @@ class AppSettings {
 
   LessonModelPreset? get _preset => LessonModelPreset.byId(lessonPreset);
 
-  /// Model slug for lessons, course outlines and the tutor chat.
+  /// The model new lessons are written with unless another is picked when
+  /// creating them: the one picked last time.
+  ModelChoice get lessonChoice => ModelChoice(
+      model: lessonModel, effort: lessonEffort, batch: lessonBatch);
+
+  /// Remembers [c] as the model for new lessons.
+  AppSettings withLessonChoice(ModelChoice c) {
+    final p = LessonModelPreset.matching(c.model, batch: c.batch);
+    return p != null
+        ? copyWith(lessonPreset: p.id, presetEffort: c.effort ?? '')
+        : copyWith(
+            lessonPreset: LessonModelPreset.customId,
+            chatModel: c.model,
+            customBatch: c.batch,
+            customEffort: c.effort ?? '',
+          );
+  }
+
+  /// The model of the tutor: the chat, hints and solutions of exercises,
+  /// and "explain differently" in the player. Always immediate.
+  ModelChoice get tutorModel =>
+      tutorChoice?.immediate ??
+      ModelChoice(model: lessonModel, effort: recommendedEffort);
+
+  /// The model that plans a course: the outline is one request the student
+  /// waits for, so always immediate. By default the most accurate model at
+  /// the recommended effort, whatever writes the lessons.
+  ModelChoice get plannerModel =>
+      plannerChoice?.immediate ??
+      ModelChoice(
+          model: LessonModelPreset.solBatch.model, effort: recommendedEffort);
+
+  /// The model that writes and grades quizzes, asked right away.
+  ModelChoice get quizModel =>
+      quizChoice?.immediate ??
+      ModelChoice(model: lessonModel, effort: recommendedEffort);
+
+  /// Whether new quizzes are ordered through the Batch API (answered later,
+  /// about half the price). Grading is always immediate.
+  bool get quizBatch => quizChoice?.batch ?? false;
+
+  /// Model slug of [lessonChoice].
   String get lessonModel => _preset?.model ?? chatModel;
 
-  /// Whether notes and lecture scripts go through the Batch API. Outlines
-  /// and chat are always immediate.
+  /// Whether [lessonChoice] goes through the Batch API. Outlines and chat
+  /// are always immediate.
   bool get lessonBatch => _preset?.batch ?? customBatch;
 
-  /// `reasoning.effort` for notes and lecture scripts, or null.
+  /// `reasoning.effort` of [lessonChoice], or null.
   String? get lessonEffort {
     final p = _preset;
     final chosen = p == null ? customEffort : presetEffort;
@@ -699,6 +970,9 @@ class AppSettings {
     String? customEffort,
     String? presetEffort,
     bool clearPresetEffort = false,
+    ModelChoice? tutorChoice,
+    ModelChoice? quizChoice,
+    ModelChoice? plannerChoice,
     bool? mathChecks,
     bool? verifyProofs,
     String? verifierModel,
@@ -709,6 +983,7 @@ class AppSettings {
     TtsBackend? ttsBackend,
     String? voiceModel,
     int? voiceSpeaker,
+    String? browserVoice,
     String? openRouterTtsModel,
     String? openRouterTtsVoice,
     double? pauseScale,
@@ -727,6 +1002,9 @@ class AppSettings {
         customEffort: customEffort ?? this.customEffort,
         presetEffort:
             clearPresetEffort ? null : (presetEffort ?? this.presetEffort),
+        tutorChoice: tutorChoice ?? this.tutorChoice,
+        quizChoice: quizChoice ?? this.quizChoice,
+        plannerChoice: plannerChoice ?? this.plannerChoice,
         mathChecks: mathChecks ?? this.mathChecks,
         verifyProofs: verifyProofs ?? this.verifyProofs,
         verifierModel: verifierModel ?? this.verifierModel,
@@ -737,6 +1015,7 @@ class AppSettings {
         ttsBackend: ttsBackend ?? this.ttsBackend,
         voiceModel: voiceModel ?? this.voiceModel,
         voiceSpeaker: voiceSpeaker ?? this.voiceSpeaker,
+        browserVoice: browserVoice ?? this.browserVoice,
         openRouterTtsModel: openRouterTtsModel ?? this.openRouterTtsModel,
         openRouterTtsVoice: openRouterTtsVoice ?? this.openRouterTtsVoice,
         pauseScale: pauseScale ?? this.pauseScale,
@@ -755,6 +1034,9 @@ class AppSettings {
         'customBatch': customBatch,
         'customEffort': customEffort,
         'presetEffort': presetEffort,
+        'tutorChoice': tutorChoice?.toJson(),
+        'quizChoice': quizChoice?.toJson(),
+        'plannerChoice': plannerChoice?.toJson(),
         'mathChecks': mathChecks,
         'verifyProofs': verifyProofs,
         'verifierModel': verifierModel,
@@ -765,6 +1047,7 @@ class AppSettings {
         'ttsBackend': ttsBackend.name,
         'voiceModel': voiceModel,
         'voiceSpeaker': voiceSpeaker,
+        'browserVoice': browserVoice,
         'openRouterTtsModel': openRouterTtsModel,
         'openRouterTtsVoice': openRouterTtsVoice,
         'pauseScale': pauseScale,
@@ -809,6 +1092,9 @@ class AppSettings {
       presetEffort: reasoningEfforts.contains(j['presetEffort'])
           ? j['presetEffort'] as String
           : null,
+      tutorChoice: ModelChoice.fromJson(j['tutorChoice']),
+      quizChoice: ModelChoice.fromJson(j['quizChoice']),
+      plannerChoice: ModelChoice.fromJson(j['plannerChoice']),
       mathChecks: j['mathChecks'] as bool? ?? d.mathChecks,
       verifyProofs: j['verifyProofs'] as bool? ?? d.verifyProofs,
       verifierModel: j['verifierModel'] as String? ?? d.verifierModel,
@@ -821,6 +1107,7 @@ class AppSettings {
       voiceModel: j['voiceModel'] as String? ?? d.voiceModel,
       voiceSpeaker: ((j['voiceSpeaker'] ?? j['kokoroVoice']) as num?)?.toInt() ??
           d.voiceSpeaker,
+      browserVoice: j['browserVoice'] as String? ?? d.browserVoice,
       openRouterTtsModel:
           j['openRouterTtsModel'] as String? ?? d.openRouterTtsModel,
       openRouterTtsVoice:

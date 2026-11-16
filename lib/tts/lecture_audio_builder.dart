@@ -1,7 +1,7 @@
-import 'dart:io';
 import 'dart:typed_data';
 
 import '../core/models.dart';
+import '../platform/files.dart';
 import 'tts_engine.dart';
 import 'wav.dart';
 
@@ -77,13 +77,12 @@ class LectureAudioBuilder {
       final durationMs = wav.positionMs;
       await wav.close();
       wav = null;
-      await File(tmpPath).rename(outPath);
+      await moveFile(tmpPath, outPath);
       return LectureAudio(segments: timed, durationMs: durationMs);
     } catch (_) {
       try {
-        await wav?.close();
-        final f = File(tmpPath);
-        if (await f.exists()) await f.delete();
+        await wav?.abandon();
+        await deleteFile(tmpPath);
       } catch (_) {}
       rethrow;
     }

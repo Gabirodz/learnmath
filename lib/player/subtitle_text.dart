@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_math_fork/flutter_math.dart';
+import 'package:learnmath/notes/fit_math.dart';
 
 /// Subtitle line: plain text with inline `$...$` LaTeX rendered as math.
-/// Wraps like normal text; formulas that fail to parse show as raw TeX.
+/// Wraps like normal text. A formula wider than the line is shrunk (to 70 %
+/// at least) and, if still too wide, broken after its relations and
+/// operators ([FitMath]). Formulas that fail to parse show as raw TeX.
 class SubtitleText extends StatelessWidget {
   const SubtitleText(
     this.text, {
@@ -30,9 +32,8 @@ class SubtitleText extends StatelessWidget {
         WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: Math.tex(
+          child: FitMath(
             tex,
-            mathStyle: MathStyle.text,
             textStyle: style,
             onErrorFallback: (_) => Text(tex, style: style),
           ),

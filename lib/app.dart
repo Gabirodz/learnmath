@@ -18,7 +18,10 @@ final appRouter = GoRouter(
     ),
     GoRoute(
       path: '/lesson/:id',
-      builder: (_, state) => LessonScreen(lessonId: state.pathParameters['id']!),
+      builder: (_, state) => LessonScreen(
+        lessonId: state.pathParameters['id']!,
+        quizTab: state.uri.queryParameters['tab'] == 'quiz',
+      ),
     ),
     GoRoute(path: '/settings', builder: (_, _) => const SettingsScreen()),
     GoRoute(path: '/import-book', builder: (_, _) => const BookImportScreen()),
@@ -34,6 +37,7 @@ final appRouter = GoRouter(
       builder: (_, state) => ImportLessonScreen(
         topic: state.uri.queryParameters['topic'] ?? '',
         course: true,
+        continues: state.uri.queryParameters['continues'],
       ),
     ),
   ],

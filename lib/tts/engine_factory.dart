@@ -1,18 +1,25 @@
 import '../ai/openrouter_client.dart';
 import '../core/models.dart';
+import '../platform/files.dart';
+import 'kokoro_web.dart';
 import 'on_device_tts.dart';
 import 'tts_engine.dart';
 
 /// The speech engine the user's settings ask for: the on-device voice model
 /// or OpenRouter's cloud voice. Unlike lecture generation this never
 /// downloads anything: with the on-device backend, [TtsEngine.prepare] fails
-/// with a readable message when the voice model is not installed.
+/// with a readable message when the voice model is not installed. (In a
+/// browser the on-device voice is Kokoro, which fetches itself when first
+/// used.)
 TtsEngine createTtsEngine(
   AppSettings settings,
   VoiceModelManager voices,
   OpenRouterClient client,
 ) {
   if (settings.ttsBackend == TtsBackend.onDevice) {
+    if (filesAreBlobs) {
+      return createKokoroWebEngine(voice: settings.browserVoice);
+    }
     return _InstalledOnlyEngine(
       manager: voices,
       model: VoiceModel.byId(settings.voiceModel),
@@ -30,6 +37,9 @@ TtsEngine createTtsEngine(
 /// with the lesson.
 String voiceLabel(AppSettings settings) {
   if (settings.ttsBackend == TtsBackend.onDevice) {
+    if (filesAreBlobs) {
+      return 'Kokoro · ${KokoroVoice.byId(settings.browserVoice).name}';
+    }
     final model = VoiceModel.byId(settings.voiceModel);
     final speaker = settings.voiceSpeaker;
     return speaker >= 0 && speaker < model.speakers.length

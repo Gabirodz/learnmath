@@ -4,27 +4,35 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../cards/cards_pane.dart';
 import '../chat/chat_controller.dart';
 import '../chat/chat_pane.dart';
 import '../checks/check_banner.dart';
 import '../checks/review_banner.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
+import '../platform/files.dart';
 import '../exercises/exercise_parser.dart';
 import '../exercises/exercises_sheet.dart';
 import '../notes/notes_view.dart';
 import '../notes/pdf_exporter.dart';
 import '../notes/pdf_view.dart';
+import '../player/mini_player.dart';
 import '../player/player_view.dart';
 import '../quiz/quiz_pane.dart';
+import 'model_picker.dart';
 import 'widgets.dart';
 
-/// One lesson: Listen / Notes / PDF / Chat. Phones get four tabs; wide screens
-/// show the player next to the other three.
+/// One lesson: Listen / Notes / PDF / Chat / Quiz. Phones get them as tabs;
+/// wide screens show the player next to the others. A review of studied
+/// lessons has its flashcards where the PDF would be.
 class LessonScreen extends ConsumerWidget {
-  const LessonScreen({super.key, required this.lessonId});
+  const LessonScreen({super.key, required this.lessonId, this.quizTab = false});
 
   final String lessonId;
+
+  /// Opens on the Quiz tab (from a "quiz ready" notification).
+  final bool quizTab;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -44,7 +52,11 @@ class LessonScreen extends ConsumerWidget {
     final wide = MediaQuery.sizeOf(context).width >= 840;
     // Index of the Chat tab in the tab controller of each layout.
     final chatTab = wide ? 2 : 3;
-    final pdfLabel = lesson.isBookChapter ? 'Book' : 'PDF';
+    final pdfLabel = lesson.isReview
+        ? 'Cards'
+        : lesson.isBookChapter
+            ? 'Book'
+            : 'PDF';
 
     // Attaches an excerpt to the next chat message and shows the chat.
     Widget withAsk(Widget Function(void Function(String quote) ask) build) =>
@@ -59,9 +71,11 @@ class LessonScreen extends ConsumerWidget {
         withAsk((ask) => _ListenPane(lesson: lesson, onAsk: ask));
     final notes =
         withAsk((ask) => _NotesPane(lessonId: lessonId, onAsk: ask));
-    final pdf = lesson.isBookChapter
-        ? _BookPane(lesson: lesson)
-        : _PdfPane(lessonId: lessonId);
+    final pdf = lesson.isReview
+        ? CardsPane(lessonId: lessonId)
+        : lesson.isBookChapter
+            ? _BookPane(lesson: lesson)
+            : _PdfPane(lessonId: lessonId);
     final chat = ChatPane(lessonId: lessonId);
     final quiz = QuizPane(lessonId: lessonId);
 
@@ -72,6 +86,15 @@ class LessonScreen extends ConsumerWidget {
         onSelected: (v) {
           if (v == 'rerecord') ref.read(generationProvider).rerecord(lessonId);
           if (v == 'verify') _confirmVerify(context, ref);
+          if (v == 'studied') {
+            ref.read(repositoryProvider).updateLesson(
+                lessonId,
+                (l) => l.completed
+                    ? l.copyWith(completed: false)
+                    : l.copyWith(
+                        completed: true,
+                        completedAt: l.completedAt ?? DateTime.now()));
+          }
         },
         itemBuilder: (_) => [
           PopupMenuItem(
@@ -97,6 +120,16 @@ class LessonScreen extends ConsumerWidget {
                 !jobRunning,
             child: const Text('Verify proofs with a second model'),
           ),
+          // Studied lessons are what a review can cover. Listening to the
+          // end marks a lesson too; this is for lessons that were read.
+          if (!lesson.isReview && !lesson.isRecap)
+            PopupMenuItem(
+              value: 'studied',
+              enabled: lesson.hasNotes,
+              child: Text(lesson.completed
+                  ? 'Mark as not studied'
+                  : 'Mark as studied'),
+            ),
         ],
       ),
     ];
@@ -104,8 +137,15 @@ class LessonScreen extends ConsumerWidget {
     if (wide) {
       return DefaultTabController(
         length: 4,
+        initialIndex: quizTab ? 3 : 0,
         child: Scaffold(
-          appBar: AppBar(title: Text(lesson.title), actions: actions),
+          appBar: AppBar(
+            leading: homeButtonIfRoot(context),
+            title: Text(lesson.title),
+            actions: actions,
+          ),
+          bottomNavigationBar:
+              _LessonMiniPlayer(lessonId: lesson.id, wide: true),
           body: Row(
             children: [
               Expanded(flex: 5, child: listen),
@@ -136,8 +176,10 @@ class LessonScreen extends ConsumerWidget {
     }
     return DefaultTabController(
       length: 5,
+      initialIndex: quizTab ? 4 : 0,
       child: Scaffold(
         appBar: AppBar(
+          leading: homeButtonIfRoot(context),
           title: Text(lesson.title),
           actions: actions,
           bottom: TabBar(tabs: [
@@ -148,6 +190,8 @@ class LessonScreen extends ConsumerWidget {
             const Tab(text: 'Quiz'),
           ]),
         ),
+        bottomNavigationBar:
+            _LessonMiniPlayer(lessonId: lesson.id, wide: false),
         // Horizontal swipes belong to the player's double-tap surface and to
         // wide formulas, so tabs switch by tapping only.
         body: TabBarView(
@@ -155,6 +199,37 @@ class LessonScreen extends ConsumerWidget {
           children: [listen, notes, pdf, chat, quiz],
         ),
       ),
+    );
+  }
+}
+
+/// The mini-player on a lesson screen: shown while a lecture is loaded,
+/// except where this lesson's own player is on screen (its Listen tab, or
+/// beside the notes on a wide screen).
+class _LessonMiniPlayer extends ConsumerWidget {
+  const _LessonMiniPlayer({required this.lessonId, required this.wide});
+  final String lessonId;
+  final bool wide;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final player = ref.watch(lecturePlayerProvider);
+    final gap = SizedBox(height: MediaQuery.paddingOf(context).bottom);
+    return ValueListenableBuilder<Lesson?>(
+      valueListenable: player.lesson,
+      builder: (context, loaded, _) {
+        if (loaded == null || loaded.id != lessonId) {
+          return const MiniPlayerBar();
+        }
+        if (wide) return gap;
+        final tabs = DefaultTabController.of(context);
+        return ListenableBuilder(
+          listenable: tabs,
+          builder: (context, _) => tabs.index == 0
+              ? gap
+              : MiniPlayerBar(onOpen: (_) => tabs.animateTo(0)),
+        );
+      },
     );
   }
 }
@@ -213,11 +288,20 @@ class _ListenPane extends ConsumerWidget {
               style: theme.textTheme.titleMedium, textAlign: TextAlign.center),
           const SizedBox(height: 8),
           Text(
-            lesson.isWaitingForBatch
-                ? 'This lesson is in the batch queue, at about half the price. '
-                    'The answer usually arrives within minutes, at most a day. '
-                    'You can leave the app: LearnMath notifies you when it '
-                    'is here.'
+            lesson.isWaitingForBatch && lesson.hasNotes
+                ? 'The notes are ready to read. The lecture script is a '
+                    'second request to the model and is in the batch queue '
+                    'now, at about half the price; it usually arrives '
+                    'within minutes, at most a day. After that the lecture '
+                    'is recorded on this device. You can leave the app: '
+                    'LearnMath tells you when the lesson is finished.'
+                : lesson.isWaitingForBatch
+                    ? 'The notes are being written in the batch queue, at '
+                        'about half the price; they usually arrive within '
+                        'minutes, at most a day. Then the lecture script is '
+                        'written the same way and the lecture is recorded '
+                        'on this device. You can leave the app: LearnMath '
+                        'tells you when the lesson is finished.'
                 : lesson.hasNotes
                     ? 'The notes are ready to read while the lecture is '
                         'recorded. You can leave the app; a notification '
@@ -264,6 +348,9 @@ class _ListenPane extends ConsumerWidget {
                 ),
             ],
           ),
+          // A retry can go to another model.
+          if (!lesson.hasNotes && !lesson.isBookChapter)
+            _LessonModelButton(lesson: lesson),
         ],
       );
     } else if (lesson.isBookChapter) {
@@ -309,6 +396,26 @@ class _ListenPane extends ConsumerWidget {
               style: muted, textAlign: TextAlign.center),
         ],
       );
+    } else if (lesson.hasNotes && lesson.segments.isNotEmpty) {
+      // Written and scripted, but with no recording on this device: one
+      // brought over in a backup without its recordings.
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'The notes and the lecture script are here, but the lecture has '
+            'not been recorded on this device.',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: () =>
+                generateLesson(context, ref, lesson.id, lesson: lesson),
+            icon: const Icon(Icons.headphones_outlined),
+            label: const Text('Record the lecture'),
+          ),
+        ],
+      );
     } else {
       content = Column(
         mainAxisSize: MainAxisSize.min,
@@ -321,6 +428,7 @@ class _ListenPane extends ConsumerWidget {
             icon: const Icon(Icons.auto_awesome),
             label: const Text('Generate lesson'),
           ),
+          _LessonModelButton(lesson: lesson),
           if (canWriteOutside(lesson)) ...[
             const SizedBox(height: 8),
             OutlinedButton(
@@ -341,6 +449,28 @@ class _ListenPane extends ConsumerWidget {
   }
 }
 
+/// Names the model a lesson that is not written yet will be written with,
+/// and lets the student pick another.
+class _LessonModelButton extends ConsumerWidget {
+  const _LessonModelButton({required this.lesson});
+  final Lesson lesson;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    if (!settings.hasApiKey) return const SizedBox.shrink();
+    return ModelButton(
+      title: 'Model for this lesson',
+      allowBatch: true,
+      alignment: Alignment.center,
+      value: lesson.model ?? settings.lessonChoice,
+      onChanged: (c) => ref
+          .read(repositoryProvider)
+          .updateLesson(lesson.id, (l) => l.copyWith(model: c)),
+    );
+  }
+}
+
 class _NotesPane extends ConsumerWidget {
   const _NotesPane({required this.lessonId, required this.onAsk});
   final String lessonId;
@@ -349,13 +479,14 @@ class _NotesPane extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // Select only what is shown so position saves don't re-render the notes.
-    final (markdown, checks, report, idle, review) = ref.watch(
+    final (markdown, checks, report, idle, review, writtenBy) = ref.watch(
         lessonProvider(lessonId).select((a) => (
               a.value?.notesMarkdown,
               a.value?.checks,
               a.value?.checkReport,
               a.value?.stage == LessonStage.ready,
               a.value?.review,
+              a.value?.writtenBy,
             )));
     if (markdown == null || markdown.isEmpty) {
       return const _Placeholder('The text appears here once it is ready.');
@@ -374,6 +505,18 @@ class _NotesPane extends ConsumerWidget {
               : null,
         ),
         ReviewBanner(review: review),
+        if (writtenBy != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Written by $writtenBy',
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant),
+              ),
+            ),
+          ),
         Expanded(
           child: Stack(
             children: [
@@ -475,6 +618,11 @@ class _PdfPaneState extends ConsumerState<_PdfPane>
         .select((a) => (a.value?.hasNotes ?? false, a.value?.pdfPath)));
     if (!hasNotes) {
       return const _Placeholder('The PDF is available once notes are written.');
+    }
+    if (filesAreBlobs) {
+      return const _Placeholder(
+          'The PDF of the notes is not available in the browser yet. '
+          'The Notes tab has the same content.');
     }
     if (_building) {
       return const Center(

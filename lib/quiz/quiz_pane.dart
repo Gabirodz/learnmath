@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/models.dart' show ModelChoice;
 import '../core/providers.dart';
 import '../notes/notes_view.dart';
+import '../ui/model_picker.dart';
 import '../ui/widgets.dart';
 import 'quiz_controller.dart';
 import 'quiz_models.dart';
@@ -44,13 +46,30 @@ class _QuizPaneState extends ConsumerState<QuizPane>
     if (id != null && mounted) setState(() => _open = id);
   }
 
+  Future<void> _order() async {
+    final ok = await _controller.order(
+        difficulty: _difficulty, kind: _kind, count: _count);
+    if (ok && mounted) {
+      _say('Quiz ordered. It usually arrives within minutes, at most a day; '
+          'LearnMath tells you when it is ready.');
+    }
+  }
+
+  void _setBatch(bool batch) {
+    ref.read(settingsProvider.notifier).update((s) => s.copyWith(
+        quizChoice: ModelChoice(
+            model: s.quizModel.model,
+            effort: s.quizModel.effort,
+            batch: batch)));
+  }
+
   Future<String?> _prompt() async {
     final lesson =
         await ref.read(repositoryProvider).getLesson(widget.lessonId);
     if (lesson == null || !lesson.hasNotes) return null;
     return QuizPrompts.external(
       title: lesson.title,
-      notesMarkdown: lesson.notesMarkdown!,
+      notesMarkdown: lesson.studyText!,
       difficulty: _difficulty,
       kind: _kind,
       count: _count,
@@ -120,6 +139,7 @@ class _QuizPaneState extends ConsumerState<QuizPane>
     final tt = Theme.of(context).textTheme;
     final cs = Theme.of(context).colorScheme;
     final busy = state.writing;
+    final batch = ref.watch(settingsProvider.select((s) => s.quizBatch));
     return CentredListView(
       maxWidth: kNotesMaxWidth,
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
@@ -173,7 +193,40 @@ class _QuizPaneState extends ConsumerState<QuizPane>
               onSelected: busy ? null : (_) => setState(() => _count = n),
             ),
         ]),
-        const SizedBox(height: 24),
+        if (hasKey) ...[
+          const SizedBox(height: 16),
+          Text('Written and graded by', style: tt.labelLarge),
+          ModelButton(
+            title: 'Quiz model',
+            enabled: !busy,
+            value: ref.watch(settingsProvider.select((s) => s.quizModel)),
+            onChanged: (c) => ref.read(settingsProvider.notifier).update(
+                (s) => s.copyWith(
+                    quizChoice: ModelChoice(
+                        model: c.model, effort: c.effort, batch: s.quizBatch))),
+          ),
+          const SizedBox(height: 8),
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: false, label: Text('Now · recommended')),
+              ButtonSegment(value: true, label: Text('Batch · half price')),
+            ],
+            selected: {batch},
+            onSelectionChanged:
+                busy ? null : (v) => _setBatch(v.single),
+          ),
+          if (batch)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                'Written through the Batch API: usually within minutes, at '
+                'most a day. You get a notification when it is ready. '
+                'Answers are still graded right away.',
+                style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+              ),
+            ),
+        ],
+        const SizedBox(height: 16),
         if (busy)
           Row(children: [
             const SizedBox(
@@ -182,8 +235,16 @@ class _QuizPaneState extends ConsumerState<QuizPane>
                 child: CircularProgressIndicator(strokeWidth: 2.5)),
             const SizedBox(width: 12),
             Expanded(
-                child: Text('Writing $_count questions…', style: tt.bodyLarge)),
+                child: Text(
+                    batch ? 'Ordering the quiz…' : 'Writing $_count questions…',
+                    style: tt.bodyLarge)),
           ])
+        else if (hasKey && batch)
+          FilledButton.icon(
+            onPressed: _order,
+            icon: const Icon(Icons.schedule_send_outlined),
+            label: const Text('Order quiz'),
+          )
         else if (hasKey)
           FilledButton.icon(
             onPressed: _start,
@@ -220,6 +281,14 @@ class _QuizPaneState extends ConsumerState<QuizPane>
           const SizedBox(height: 24),
           Text('Earlier quizzes', style: tt.labelLarge),
           for (final q in state.quizzes)
+            if (q.isWaiting || q.isFailed)
+              _OrderedQuizTile(
+                quiz: q,
+                onCancel: () => _controller.cancelOrder(q.id),
+                onRetry: busy ? null : () => _controller.retryOrder(q.id),
+                onDelete: () => _controller.delete(q.id),
+              )
+            else
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Icon(q.finished
@@ -551,6 +620,65 @@ class _FreeAnswerState extends State<_FreeAnswer> {
           ]),
         ],
       ],
+    );
+  }
+}
+
+/// A quiz ordered through the Batch API: waiting for its answer, or failed.
+class _OrderedQuizTile extends StatelessWidget {
+  const _OrderedQuizTile({
+    required this.quiz,
+    required this.onCancel,
+    required this.onRetry,
+    required this.onDelete,
+  });
+
+  final Quiz quiz;
+  final VoidCallback onCancel;
+  final VoidCallback? onRetry;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final r = quiz.request;
+    final what = [
+      if (quiz.difficulty != null) quiz.difficulty!.label,
+      if (r != null) '${r.count} questions',
+      'batch',
+    ].join(' · ');
+    final at = TimeOfDay.fromDateTime(quiz.createdAt).format(context);
+    if (quiz.isWaiting) {
+      return ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: const Icon(Icons.hourglass_top_rounded),
+        title: Text(what),
+        subtitle: Text('Waiting for the batch answer · ordered $at'),
+        trailing: IconButton(
+          tooltip: 'Stop waiting for this quiz',
+          icon: const Icon(Icons.close),
+          onPressed: onCancel,
+        ),
+      );
+    }
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(Icons.error_outline, color: cs.error),
+      title: Text(what),
+      subtitle: Text(quiz.error ?? 'Could not be written.'),
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (r != null)
+          IconButton(
+            tooltip: 'Order again',
+            icon: const Icon(Icons.refresh),
+            onPressed: onRetry,
+          ),
+        IconButton(
+          tooltip: 'Delete quiz',
+          icon: const Icon(Icons.delete_outline),
+          onPressed: onDelete,
+        ),
+      ]),
     );
   }
 }

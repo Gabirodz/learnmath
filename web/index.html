@@ -18,21 +18,90 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="Graduate math lectures, written and narrated by AI.">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="learnmath">
+  <meta name="apple-mobile-web-app-title" content="LearnMath">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>learnmath</title>
+  <title>LearnMath</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- Start the two big downloads (the app and the drawing engine) early. -->
+  <link rel="preload" href="main.dart.js" as="script">
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+  <!-- The loading screen: shown until Flutter has drawn its first frame. -->
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { background: #fbf8ff; }
+    #loading {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 20px; padding: 24px; text-align: center;
+      background: #fbf8ff; color: #1b1b21;
+      font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
+      transition: opacity .25s ease;
+    }
+    #loading.done { opacity: 0; pointer-events: none; }
+    #loading h1 { margin: 0; font-size: 28px; font-weight: 500; letter-spacing: .2px; }
+    #loading .bar {
+      width: min(240px, 60vw); height: 4px; border-radius: 2px; overflow: hidden;
+      background: rgba(81, 91, 146, .18);
+    }
+    #loading .bar::before {
+      content: ""; display: block; width: 40%; height: 100%; border-radius: 2px;
+      background: #515b92; animation: loading-slide 1.2s ease-in-out infinite;
+    }
+    #loading p { margin: 0; font-size: 14px; opacity: .72; min-height: 1.4em; max-width: 30em; }
+    @keyframes loading-slide { from { transform: translateX(-110%); } to { transform: translateX(260%); } }
+    @media (prefers-reduced-motion: reduce) {
+      #loading .bar::before { animation: none; width: 100%; opacity: .5; }
+    }
+    @media (prefers-color-scheme: dark) {
+      body, #loading { background: #121318; }
+      #loading { color: #e3e1e9; }
+      #loading .bar { background: rgba(186, 195, 255, .2); }
+      #loading .bar::before { background: #bac3ff; }
+    }
+  </style>
 </head>
 <body>
+  <div id="loading" role="status" aria-live="polite">
+    <h1>LearnMath</h1>
+    <div class="bar" aria-hidden="true"></div>
+    <p id="loading-status">Loading…</p>
+  </div>
+  <script>
+    // Says what is going on while the app (about 6 MB the first time) is
+    // fetched and started, and goes away with Flutter's first frame.
+    (() => {
+      const screen = document.getElementById('loading');
+      const status = document.getElementById('loading-status');
+      let done = false;
+      const say = (text) => { if (!done) status.textContent = text; };
+      // Called by flutter_bootstrap.js once the app's code has arrived.
+      window.learnmathLoading = { starting: () => say('Starting…') };
+      const slow = setTimeout(
+          () => say('Still loading. The first visit downloads about 6 MB.'), 6000);
+      const stuck = setTimeout(
+          () => say('This is taking long. Check your connection, then reload the page.'),
+          45000);
+      window.addEventListener('flutter-first-frame', () => {
+        done = true;
+        clearTimeout(slow);
+        clearTimeout(stuck);
+        screen.classList.add('done');
+        setTimeout(() => screen.remove(), 300);
+      }, { once: true });
+    })();
+  </script>
   <!--
     You can customize the "flutter_bootstrap.js" script.
     This is useful to provide a custom configuration to the Flutter loader
@@ -41,6 +110,8 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
+  <!-- File storage and the Kokoro voice; see learnmath_web.js. -->
+  <script src="learnmath_web.js"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

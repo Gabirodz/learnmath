@@ -6,26 +6,51 @@ import '../core/models.dart';
 import '../core/providers.dart';
 import 'player_controls.dart';
 
-/// The mini-player docked at the bottom of the library and course screens
-/// (use it as `bottomNavigationBar`, so the floating action button moves up).
-/// Shows nothing but the bottom safe-area gap while no lesson is loaded.
+/// The mini-player docked at the bottom of the library, course and lesson
+/// screens (use it as `bottomNavigationBar`, so the floating action button
+/// moves up). Shows nothing but the bottom safe-area gap while no lesson is
+/// loaded.
 class MiniPlayerBar extends ConsumerWidget {
-  const MiniPlayerBar({super.key});
+  const MiniPlayerBar({super.key, this.onOpen});
+
+  /// What tapping the title does; by default it opens the lesson.
+  final void Function(Lesson lesson)? onOpen;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return MiniPlayer(
       controls: ref.watch(lecturePlayerProvider),
-      onOpen: (lesson) => context.push('/lesson/${lesson.id}'),
+      skipSeconds: ref.watch(settingsProvider.select((s) => s.skipSeconds)),
+      onOpen: onOpen ?? (lesson) => context.push('/lesson/${lesson.id}'),
     );
   }
 }
 
 class MiniPlayer extends StatelessWidget {
-  const MiniPlayer({super.key, required this.controls, required this.onOpen});
+  const MiniPlayer({
+    super.key,
+    required this.controls,
+    required this.onOpen,
+    this.skipSeconds = 10,
+  });
 
   final PlayerControls controls;
   final void Function(Lesson lesson) onOpen;
+  final int skipSeconds;
+
+  IconData get _backIcon => switch (skipSeconds) {
+        5 => Icons.replay_5_rounded,
+        10 => Icons.replay_10_rounded,
+        30 => Icons.replay_30_rounded,
+        _ => Icons.fast_rewind_rounded,
+      };
+
+  IconData get _forwardIcon => switch (skipSeconds) {
+        5 => Icons.forward_5_rounded,
+        10 => Icons.forward_10_rounded,
+        30 => Icons.forward_30_rounded,
+        _ => Icons.fast_forward_rounded,
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -69,6 +94,11 @@ class MiniPlayer extends StatelessWidget {
                         ),
                       ),
                     ),
+                    IconButton(
+                      tooltip: 'Back $skipSeconds seconds',
+                      icon: Icon(_backIcon),
+                      onPressed: () => controls.skipBy(forward: false),
+                    ),
                     StreamBuilder<bool>(
                       stream: controls.playingStream,
                       initialData: controls.playing,
@@ -85,6 +115,11 @@ class MiniPlayer extends StatelessWidget {
                           onPressed: controls.toggle,
                         );
                       },
+                    ),
+                    IconButton(
+                      tooltip: 'Forward $skipSeconds seconds',
+                      icon: Icon(_forwardIcon),
+                      onPressed: () => controls.skipBy(forward: true),
                     ),
                     IconButton(
                       tooltip: 'Stop and close the player',

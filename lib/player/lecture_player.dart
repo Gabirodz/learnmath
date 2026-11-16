@@ -1,12 +1,15 @@
 import 'dart:async';
 
+import 'package:audio_service/audio_service.dart'
+    show AudioProcessingState, MediaAction, MediaItem, PlaybackState;
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:just_audio_background/just_audio_background.dart';
 
 import '../core/models.dart';
 import '../core/storage.dart';
+import '../platform/files.dart';
+import 'lecture_audio_handler.dart';
 import 'next_lesson.dart';
 import 'player_controls.dart';
 
@@ -16,14 +19,28 @@ import 'player_controls.dart';
 /// When a lecture of a course ends and [autoPlayNext] allows it, the next
 /// lesson of the course that has audio is loaded and played after
 /// [advanceDelay].
-class LecturePlayer implements PlayerControls {
+///
+/// With a [LectureAudioHandler] ([media]) the lecture is also a media
+/// session: a notification with controls, lock screen, Bluetooth and
+/// headset buttons. The player publishes what plays there and carries out
+/// the commands that come back.
+class LecturePlayer implements PlayerControls, MediaCommands {
   LecturePlayer(
     this._repo, {
     bool Function()? autoPlayNext,
     double Function()? speed,
+    int Function()? skipSeconds,
+    this.media,
     this.advanceDelay = const Duration(seconds: 2),
   }) : _autoPlayNext = autoPlayNext ?? (() => false),
-       _speed = speed ?? (() => 1.0) {
+       _speed = speed ?? (() => 1.0),
+       _skipSeconds = skipSeconds ?? (() => 10) {
+    media?.attach(this);
+    if (media != null) {
+      _subs.add(_audio.playbackEventStream.listen((_) => _publishState()));
+      _subs.add(_audio.playingStream.listen((_) => _publishState()));
+      segmentIndex.addListener(_onSegmentForMedia);
+    }
     _subs.add(_audio.positionStream.listen(_onPosition));
     _subs.add(
       _audio.playerStateStream.listen((s) {
@@ -48,6 +65,13 @@ class LecturePlayer implements PlayerControls {
   final LibraryRepository _repo;
   final bool Function() _autoPlayNext;
   final double Function() _speed;
+  final int Function() _skipSeconds;
+
+  /// The media session this lecture is published to, if any.
+  final LectureAudioHandler? media;
+
+  /// Section last shown in the media notification.
+  String? _mediaSection;
 
   /// Pause between the end of a lecture and the start of the next one.
   final Duration advanceDelay;
@@ -126,28 +150,83 @@ class LecturePlayer implements PlayerControls {
     await _audio.setSpeed(speed);
   }
 
-  Future<void> _setLectureSource(Lesson l, int positionMs) {
-    return _audio.setAudioSource(
-      AudioSource.file(
-        l.audioPath!,
-        tag: MediaItem(
-          id: l.id,
-          title: l.title,
-          album: _album ?? 'LearnMath',
-          duration: l.audioDurationMs == null
-              ? null
-              : Duration(milliseconds: l.audioDurationMs!),
-        ),
-      ),
-      initialPosition: Duration(milliseconds: positionMs),
-    );
+  Future<void> _setLectureSource(Lesson l, int positionMs) async {
+    try {
+      await _audio.setAudioSource(
+        await _source(l.audioPath!),
+        initialPosition: Duration(milliseconds: positionMs),
+      );
+    } finally {
+      _publishItem(l);
+    }
   }
+
+  /// A recording as the player takes it: a file on a device, a `blob:` URL
+  /// in a browser.
+  static Future<AudioSource> _source(String path) async => filesAreBlobs
+      ? AudioSource.uri(await playableUri(path))
+      : AudioSource.file(path);
+
+  // ------------------------------------------------------- media session
+
+  /// Shows [l] in the media notification: the lesson, its course, and the
+  /// section being spoken.
+  void _publishItem(Lesson l) {
+    final m = media;
+    if (m == null) return;
+    _mediaSection = currentSection;
+    m.mediaItem.add(MediaItem(
+      id: l.id,
+      title: l.title,
+      album: _album ?? 'LearnMath',
+      artist: _mediaSection,
+      duration: l.audioDurationMs == null
+          ? null
+          : Duration(milliseconds: l.audioDurationMs!),
+    ));
+  }
+
+  void _onSegmentForMedia() {
+    final l = lesson.value;
+    if (l == null || _clipActive || currentSection == _mediaSection) return;
+    _publishItem(l);
+  }
+
+  void _publishState() {
+    final m = media;
+    if (m == null) return;
+    final playing = _audio.playing;
+    m.playbackState.add(PlaybackState(
+      controls: LectureAudioHandler.controlsFor(playing: playing),
+      androidCompactActionIndices: LectureAudioHandler.compactIndices,
+      systemActions: const {
+        MediaAction.seek,
+        MediaAction.seekForward,
+        MediaAction.seekBackward,
+      },
+      processingState: switch (_audio.processingState) {
+        ProcessingState.idle => AudioProcessingState.idle,
+        ProcessingState.loading => AudioProcessingState.loading,
+        ProcessingState.buffering => AudioProcessingState.buffering,
+        ProcessingState.ready => AudioProcessingState.ready,
+        ProcessingState.completed => AudioProcessingState.completed,
+      },
+      playing: playing,
+      updatePosition: _audio.position,
+      bufferedPosition: _audio.bufferedPosition,
+      speed: _audio.speed,
+    ));
+  }
+
+  @override
+  Future<void> skipBy({required bool forward}) =>
+      skip(forward ? _skipSeconds() : -_skipSeconds());
 
   /// Plays a short spoken clip (the "explain it differently" answer) through
   /// the lecture's own audio player and returns when it has ended or was cut
-  /// short by [resumeFromSegment] / [abortClip]. just_audio_background allows
-  /// only one player instance per app, so a second `AudioPlayer` is not an
-  /// option. The lecture position is not touched; its source is put back by
+  /// short by [resumeFromSegment] / [abortClip]. It uses the lecture's own
+  /// player so the media session and audio focus stay one. The lecture
+  /// position is not touched; its source is put back by
   /// [resumeFromSegment] or [abortClip].
   Future<void> playClip(String path, {required int resumeSegment}) async {
     final l = lesson.value;
@@ -160,16 +239,12 @@ class LecturePlayer implements PlayerControls {
     _clipActive = true;
     final done = _clipDone = Completer<void>();
     try {
-      await _audio.setAudioSource(
-        AudioSource.file(
-          path,
-          tag: MediaItem(
-            id: '${l.id}#again',
-            title: 'Explained differently',
-            album: l.title,
-          ),
-        ),
-      );
+      await _audio.setAudioSource(await _source(path));
+      media?.mediaItem.add(MediaItem(
+        id: '${l.id}#again',
+        title: 'Explained differently',
+        album: l.title,
+      ));
       unawaited(_audio.play());
       await done.future;
     } catch (_) {
@@ -204,6 +279,7 @@ class LecturePlayer implements PlayerControls {
     }
   }
 
+  @override
   Future<void> play() async {
     _advanceToken++;
     if (_clipActive) {
@@ -216,6 +292,7 @@ class LecturePlayer implements PlayerControls {
     unawaited(_audio.play());
   }
 
+  @override
   Future<void> pause() {
     _advanceToken++;
     return _audio.pause();
@@ -226,6 +303,7 @@ class LecturePlayer implements PlayerControls {
 
   Future<void> setSpeed(double speed) => _audio.setSpeed(speed);
 
+  @override
   Future<void> seek(Duration to) {
     final max = duration;
     final clamped = to < Duration.zero ? Duration.zero : (to > max ? max : to);
@@ -255,6 +333,7 @@ class LecturePlayer implements PlayerControls {
     return null;
   }
 
+  @override
   Future<void> nextSection() {
     for (final i in sectionStarts) {
       if (i > segmentIndex.value) return seekToSegment(i);
@@ -264,6 +343,7 @@ class LecturePlayer implements PlayerControls {
 
   /// Goes to the start of the current section, or to the previous one when
   /// already near its start (like the "previous track" button).
+  @override
   Future<void> previousSection() {
     final starts = sectionStarts;
     final posMs = position.inMilliseconds;
@@ -342,13 +422,24 @@ class LecturePlayer implements PlayerControls {
     final token = ++_advanceToken;
     try {
       final done = (await _repo.getLesson(l.id)) ?? l;
-      final next = nextToPlay(done, await _repo.getCourseLessons(l.courseId!));
+      var next = nextToPlay(done, await _repo.getCourseLessons(l.courseId!));
+      var courseId = l.courseId!;
+      if (next == null) {
+        // The end of a part: go on with the next part of the series.
+        final course = await _repo.getCourse(courseId);
+        final following = course == null
+            ? null
+            : nextPart(course, await _repo.getCourses());
+        if (following == null) return;
+        next = firstToPlay(await _repo.getCourseLessons(following.id));
+        courseId = following.id;
+      }
       if (next == null) return;
       await Future<void>.delayed(advanceDelay);
       // The listener may have pressed play, picked another lesson or closed
       // the player during the pause.
       if (token != _advanceToken) return;
-      final album = (await _repo.getCourse(l.courseId!))?.title;
+      final album = (await _repo.getCourse(courseId))?.title;
       if (token != _advanceToken) return;
       await load(next, album: album, speed: _speed());
       await play();
@@ -359,6 +450,7 @@ class LecturePlayer implements PlayerControls {
 
   Future<void> dispose() async {
     _advanceToken++;
+    segmentIndex.removeListener(_onSegmentForMedia);
     for (final s in _subs) {
       await s.cancel();
     }

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
 import '../player/mini_player.dart';
+import 'continue_sheet.dart';
 import 'widgets.dart';
 
 class CourseScreen extends ConsumerWidget {
@@ -52,12 +53,30 @@ class CourseScreen extends ConsumerWidget {
       for (final l in remaining)
         if (!l.hasNotes && !l.isBookChapter) l,
     ];
+    // The parts of this course's series, in order.
+    final parts = [
+      for (final c in ref.watch(coursesProvider).value ?? const <Course>[])
+        if (c.series == course.series) c,
+    ]..sort((a, b) => a.part.compareTo(b.part));
+    final inSeries = parts.length > 1 || course.part > 1;
+    Course? previous, following;
+    for (final c in parts) {
+      if (c.part < course.part) previous = c;
+      if (c.part > course.part && following == null) following = c;
+    }
+    final nextNumber = (parts.isEmpty ? course.part : parts.last.part) + 1;
 
     return Scaffold(
       bottomNavigationBar: const MiniPlayerBar(),
       body: CustomScrollView(
         slivers: [
-          SliverAppBar.large(title: Text(course.title)),
+          // The title in the bar is one line; in full it heads the page,
+          // where a long one has room to wrap.
+          SliverAppBar(
+            pinned: true,
+            leading: homeButtonIfRoot(context),
+            title: Text(course.title),
+          ),
           SliverToBoxAdapter(
             child: ContentWidth(
               child: Padding(
@@ -65,6 +84,18 @@ class CourseScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (inSeries)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          'Part ${course.part}'
+                          '${parts.isNotEmpty && parts.first.id != course.id ? ' · ${parts.first.title}' : ''}',
+                          style: text.labelLarge
+                              ?.copyWith(color: scheme.primary),
+                        ),
+                      ),
+                    Text(course.title, style: text.headlineMedium),
+                    const SizedBox(height: 8),
                     if (course.description.isNotEmpty)
                       Text(course.description,
                           style: text.bodyLarge
@@ -78,6 +109,23 @@ class CourseScreen extends ConsumerWidget {
                       minHeight: 4,
                       borderRadius: BorderRadius.circular(2),
                     ),
+                    if (previous != null || following != null) ...[
+                      const SizedBox(height: 8),
+                      Wrap(spacing: 8, children: [
+                        if (previous case final p?)
+                          TextButton.icon(
+                            onPressed: () => context.push('/course/${p.id}'),
+                            icon: const Icon(Icons.arrow_back, size: 18),
+                            label: Text('Part ${p.part}'),
+                          ),
+                        if (following case final f?)
+                          TextButton.icon(
+                            onPressed: () => context.push('/course/${f.id}'),
+                            icon: const Icon(Icons.arrow_forward, size: 18),
+                            label: Text('Part ${f.part}'),
+                          ),
+                      ]),
+                    ],
                     const SizedBox(height: 16),
                     Wrap(spacing: 8, runSpacing: 8, children: [
                       FilledButton.tonalIcon(
@@ -95,6 +143,15 @@ class CourseScreen extends ConsumerWidget {
                           icon: const Icon(Icons.content_paste_go),
                           label: Text('Write lesson '
                               '${unwritten.first.order + 1} with your own AI'),
+                        ),
+                      // A book's chapters are its own; its parts cannot be
+                      // planned on.
+                      if (!course.isBook)
+                        OutlinedButton.icon(
+                          onPressed: () => showContinueSheet(context,
+                              course: course, nextPart: nextNumber),
+                          icon: const Icon(Icons.playlist_add),
+                          label: Text('Continue with part $nextNumber'),
                         ),
                     ]),
                   ],
@@ -135,7 +192,9 @@ class CourseScreen extends ConsumerWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Generate all remaining?'),
-        content: Text(ref.read(settingsProvider).lessonBatch
+        content: Text((remaining.first.model ??
+                    ref.read(settingsProvider).lessonChoice)
+                .batch
             ? '$n ${n == 1 ? 'lesson' : 'lessons'} will be sent to the batch '
                 'queue. They usually arrive within minutes, at most a day, '
                 'and you get a notification for each. This uses OpenRouter '

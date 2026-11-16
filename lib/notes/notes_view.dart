@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_math_fork/flutter_math.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
+import 'package:learnmath/notes/fit_math.dart';
+import 'package:learnmath/notes/md_blocks.dart' show normalizeTex;
 
 /// Maximum readable column width on tablets / desktop / web.
 const double kNotesMaxWidth = 720;
@@ -72,6 +74,171 @@ List<String> splitSourceBlocks(String markdown) {
   }
   flush();
   return blocks;
+}
+
+/// What a stretch of notes is, by the bold label it starts with
+/// ("**Theorem 2 (Heine-Borel).**", "**Proof.**").
+enum NoteKind { definition, theorem, example, remark, proof }
+
+final _noteLabel = RegExp(
+    r'^\s*(?:\*\*|__)\s*(definition|theorem|lemma|proposition|corollary|'
+    r'claim|fact|proof|example|non-?example|counter-?example|remark|note|'
+    r'notation|intuition|warning|caution)\b',
+    caseSensitive: false);
+
+final _proofEnd =
+    RegExp(r'\\blacksquare|\\square|\\qed|\\Box\b|[∎■□]');
+
+final _listStart = RegExp(r'^\s*([-*+]|\d+[.)])\s');
+
+/// The kind of environment [block] opens, or null for prose.
+NoteKind? noteKindOf(String block) {
+  final m = _noteLabel.firstMatch(block);
+  if (m == null) return null;
+  final w = m.group(1)!.toLowerCase();
+  return switch (w) {
+    'definition' || 'notation' => NoteKind.definition,
+    'theorem' || 'lemma' || 'proposition' || 'corollary' || 'claim' ||
+    'fact' =>
+      NoteKind.theorem,
+    'proof' => NoteKind.proof,
+    'remark' || 'note' || 'intuition' || 'warning' || 'caution' =>
+      NoteKind.remark,
+    _ => NoteKind.example,
+  };
+}
+
+/// A run of source blocks shown together: prose ([kind] null) or one
+/// definition, theorem, proof, example or remark.
+class NoteGroup {
+  NoteGroup(this.kind, this.blocks);
+  final NoteKind? kind;
+  final List<String> blocks;
+}
+
+/// Groups source blocks ([splitSourceBlocks]) into environments, each from
+/// its bold label:
+/// * a proof runs to its end mark (■, `\blacksquare`, `\qed`, ...);
+/// * an example runs to the next heading or label;
+/// * a definition, theorem or remark takes the labelled paragraph and what
+///   continues it: display formulas, lists, a sentence going on in lower
+///   case, or anything after a paragraph ending in a colon.
+/// A heading or rule always ends an environment.
+List<NoteGroup> groupNoteBlocks(List<String> blocks) {
+  final out = <NoteGroup>[];
+  NoteGroup? open;
+
+  void plain(String b) {
+    if (out.isNotEmpty && out.last.kind == null && !identical(out.last, open)) {
+      out.last.blocks.add(b);
+    } else {
+      out.add(NoteGroup(null, [b]));
+    }
+  }
+
+  bool continues(NoteGroup g, String b) {
+    switch (g.kind!) {
+      case NoteKind.proof:
+      case NoteKind.example:
+        return true;
+      case NoteKind.definition:
+      case NoteKind.theorem:
+      case NoteKind.remark:
+        final t = b.trimLeft();
+        if (t.startsWith(r'$$') || t.startsWith(r'\[')) return true;
+        if (_listStart.hasMatch(t)) return true;
+        if (t.isNotEmpty && RegExp(r'^[a-z]').hasMatch(t)) return true;
+        return g.blocks.last.trimRight().endsWith(':');
+    }
+  }
+
+  for (final b in blocks) {
+    final t = b.trimLeft();
+    if (t.startsWith('#') || RegExp(r'^([-*_])(\s*\1){2,}\s*$').hasMatch(t)) {
+      open = null;
+      plain(b);
+      continue;
+    }
+    final kind = noteKindOf(b);
+    if (kind != null) {
+      open = NoteGroup(kind, [b]);
+      out.add(open);
+    } else if (open != null && continues(open, b)) {
+      open.blocks.add(b);
+    } else {
+      open = null;
+      plain(b);
+      continue;
+    }
+    if (open.kind == NoteKind.proof && _proofEnd.hasMatch(b)) open = null;
+  }
+  return out;
+}
+
+/// The colour of a kind of environment: the hue of the box's edge and, faintly,
+/// of its fill. Text keeps the text colour.
+Color noteColor(NoteKind kind, ColorScheme cs) {
+  final dark = cs.brightness == Brightness.dark;
+  return switch (kind) {
+    NoteKind.theorem => dark ? const Color(0xFF3987E5) : const Color(0xFF2A78D6),
+    NoteKind.definition =>
+      dark ? const Color(0xFF199E70) : const Color(0xFF1BAF7A),
+    NoteKind.example => dark ? const Color(0xFFC98500) : const Color(0xFFEDA100),
+    NoteKind.remark => dark ? const Color(0xFF9085E9) : const Color(0xFF6250D6),
+    NoteKind.proof => cs.outline,
+  };
+}
+
+/// A definition, theorem, proof, example or remark in its colour-coded box:
+/// a coloured edge on the left and (except for proofs) a faint tint.
+class NoteBox extends StatelessWidget {
+  const NoteBox({super.key, required this.kind, required this.child});
+  final NoteKind kind;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final c = noteColor(kind, cs);
+    final dark = cs.brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: CustomPaint(
+        painter: _NoteBoxPainter(
+          edge: c,
+          fill: kind == NoteKind.proof
+              ? null
+              : c.withValues(alpha: dark ? 0.13 : 0.08),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+class _NoteBoxPainter extends CustomPainter {
+  _NoteBoxPainter({required this.edge, this.fill});
+  final Color edge;
+  final Color? fill;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final box = RRect.fromRectAndRadius(
+        Offset.zero & size, const Radius.circular(10));
+    canvas.save();
+    canvas.clipRRect(box);
+    if (fill != null) canvas.drawRect(Offset.zero & size, Paint()..color = fill!);
+    canvas.drawRect(
+        Rect.fromLTWH(0, 0, 4, size.height), Paint()..color = edge);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_NoteBoxPainter old) =>
+      old.edge != edge || old.fill != fill;
 }
 
 /// Non-scrolling Markdown + LaTeX renderer shared by [NotesView] and chat.
@@ -177,7 +344,7 @@ class NotesView extends StatefulWidget {
 }
 
 class _NotesViewState extends State<NotesView> {
-  List<String> _blocks = const [];
+  List<NoteGroup> _groups = const [];
 
   @override
   void initState() {
@@ -194,17 +361,25 @@ class _NotesViewState extends State<NotesView> {
     }
   }
 
+  /// Prose blocks one by one (the list stays lazy), each definition,
+  /// theorem, proof, example or remark as one item in its box.
   void _split() {
-    _blocks = widget.onAskAbout == null
-        ? const <String>[]
-        : splitSourceBlocks(widget.markdown);
+    _groups = [
+      for (final g in groupNoteBlocks(splitSourceBlocks(widget.markdown)))
+        if (g.kind == null)
+          for (final b in g.blocks) NoteGroup(null, [b])
+        else
+          g,
+    ];
   }
 
+  // Full column width: a short block (a heading, one line) would otherwise
+  // shrink to its text and be centred.
   Widget _column(Widget child) => Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: kNotesMaxWidth),
-          child: child,
+          child: SizedBox(width: double.infinity, child: child),
         ),
       );
 
@@ -218,17 +393,39 @@ class _NotesViewState extends State<NotesView> {
         child: SingleChildScrollView(
           controller: widget.controller,
           padding: resolvedPadding,
-          child: _column(MarkdownMath(widget.markdown)),
+          child: _column(Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (final g in _groups)
+                g.kind == null
+                    ? MarkdownMath(g.blocks.single)
+                    : NoteBox(
+                        kind: g.kind!,
+                        child: MarkdownMath(g.blocks.join('\n\n'))),
+            ],
+          )),
         ),
       );
     }
     return ListView.builder(
       controller: widget.controller,
       padding: resolvedPadding,
-      itemCount: _blocks.length,
-      itemBuilder: (context, i) => _column(
-        _BlockTile(source: _blocks[i], onAsk: ask),
-      ),
+      itemCount: _groups.length,
+      itemBuilder: (context, i) {
+        final g = _groups[i];
+        if (g.kind == null) {
+          return _column(_BlockTile(source: g.blocks.single, onAsk: ask));
+        }
+        return _column(NoteBox(
+          kind: g.kind!,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (final b in g.blocks) _BlockTile(source: b, onAsk: ask),
+            ],
+          ),
+        ));
+      },
     );
   }
 }
@@ -329,10 +526,13 @@ class _InlineMath extends StatelessWidget {
   Widget build(BuildContext context) {
     // The enclosing paragraph scales this whole placeholder with the system
     // text scale, so the formula itself is built at the unscaled size.
+    // Too wide for the line: shrunk a little, then broken after relations
+    // and operators, rather than cut off.
     final size = style.fontSize ?? 16;
-    return Math.tex(
-      tex.trim(),
-      mathStyle: MathStyle.text,
+    return FitMath(
+      normalizeTex(tex.trim()),
+      minScale: 0.8,
+      center: false,
       textScaleFactor: 1.0,
       textStyle: style.copyWith(
         fontSize: size,
@@ -356,7 +556,7 @@ class _DisplayMath extends StatelessWidget {
     final base = style.fontSize ?? 16;
     final scaled = MediaQuery.textScalerOf(context).scale(base);
     final math = Math.tex(
-      tex.trim(),
+      normalizeTex(tex.trim()),
       mathStyle: MathStyle.display,
       textScaleFactor: 1.0,
       textStyle: style.copyWith(

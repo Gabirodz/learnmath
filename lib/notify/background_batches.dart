@@ -100,8 +100,13 @@ Future<bool> _runBatchCheck() async {
         waiting: waiting,
         announced: announcedBefore,
         getBatch: client.getBatch);
+    // One notification per batch: a course generated at once shares one.
+    final byBatch = <String, List<WaitingBatch>>{};
     for (final b in r.announce) {
-      await LocalNotifications.showBatchArrived(b);
+      byBatch.putIfAbsent(b.batchId, () => []).add(b);
+    }
+    for (final lessons in byBatch.values) {
+      await LocalNotifications.showBatchArrived(lessons);
     }
     try {
       await announcedFile.writeAsString(jsonEncode(r.announced.toList()),

@@ -32,17 +32,36 @@ layout included, web later. Original brief: `description.txt`.
    resumes when the answer arrives (`lib/pipeline/generation_service.dart`).
 3. **Study** (`lib/ui/lesson_screen.dart`): Listen / Notes / PDF tabs; on
    screens >= 840 dp the player sits next to the notes.
+   - In the Notes tab, definitions, theorems (also lemmas, propositions,
+     corollaries), proofs, examples and remarks sit in colour-coded boxes, found
+     from the bold label they start with (`groupNoteBlocks`, `NoteBox` in
+     `lib/notes/notes_view.dart`). A proof runs to its end mark, an example to the
+     next heading or label, the others take the labelled paragraph with the formulas,
+     lists and sentences that continue it. Colours: blue theorems, green
+     definitions, amber examples, violet remarks, an outline for proofs.
+   - A backslash at the end of a line inside a formula (LaTeX's control space)
+     is written as `\ ` before rendering; flutter_math would otherwise reject the
+     whole formula (`normalizeTex` in `lib/notes/md_blocks.dart`).
    - In a course, the next lesson that has a recording starts about two seconds
      after a lecture ends (Settings: "Play the next lesson automatically")
      (`lib/player/next_lesson.dart`, `lib/player/lecture_player.dart`).
-   - A mini-player bar at the bottom of the library and course screens shows the
-     loaded lecture, with play/pause and close; tapping it opens the lesson
-     (`lib/player/mini_player.dart`).
+   - A mini-player bar at the bottom of the library, course and lesson screens shows
+     the loaded lecture, with back, play/pause, forward (the double-tap skip
+     interval) and close; tapping it opens the lesson. On a lesson screen it is
+     hidden where that lesson's own player is visible (its Listen tab, or beside
+     the notes on a wide screen), and tapping it there switches to Listen
+     (`lib/player/mini_player.dart`, `_LessonMiniPlayer` in `lib/ui/lesson_screen.dart`).
+   - The lecture is a media session (`audio_service`,
+     `lib/player/lecture_audio_handler.dart`): a notification and lock-screen
+     controls like a music app's (previous section, back, play/pause, forward, next
+     section), Bluetooth and headset buttons. The lesson title, course and current
+     section are shown; tapping the notification opens the lesson. The player
+     attaches itself to the handler started in `main.dart`.
    - "Explain this again differently" pauses the lecture and asks the lesson model
      for a different explanation of the current point (3 to 5 spoken sentences).
      It is spoken with the current voice, shown as subtitle, and the lecture then
      resumes at the start of the segment. It plays through the lecture's own player,
-     because just_audio_background allows only one player instance
+     so the media session and audio focus stay one
      (`lib/player/reexplain.dart`, `lib/tts/engine_factory.dart`).
 
 4. **Ask** (`lib/chat`): every lesson has a Chat tab with a tutor grounded in
@@ -101,6 +120,48 @@ assistant write the quiz (the prompt contains the notes); pasted quizzes are sto
 with the lesson like the others. Quizzes live in their own store (`quiz_store.dart`),
 not in the lesson record.
 
+A quiz can also be ordered through the Batch API ("Batch · half price" next to
+the model; "Now" stays the recommended default). It is stored at once as waiting
+("Waiting for the batch answer · ordered 10:42", with a button to stop waiting),
+collected by `GenerationService.pollBatches` like a lesson's answer (`orderQuiz`,
+`_collectQuiz`), and announced with "Quiz ready"; the notification opens the lesson
+on its Quiz tab (`/lesson/<id>?tab=quiz`). With the app closed, the background check
+says "A quiz has arrived". A quiz whose answer cannot be read shows the reason and
+"Order again". Grading stays immediate. Lessons and quizzes waiting for batches
+share the polling, the background check, the keep-alive count and batch deletion
+(`_waiters` in `generation_service.dart`). The pipeline and the Quiz tab both write
+the quiz store, so changes go through `QuizStore.update` (one transaction) and the
+tab follows `QuizStore.watch`.
+
+**Review of what you studied** (`GenerationService.createReview`, `lib/ui/review_sheet.dart`,
+`lib/cards`): the cards icon in the library lists the studied lessons (listened to
+the end, or "Mark as studied" in the lesson menu) and makes a review of the ones
+ticked. The review is a lesson of its own with a Cards tab in place of the PDF:
+flashcards, a short lesson with its lecture, and a quiz and a chat that cover all
+the lessons. It is not written from the full notes: each lesson first gets a key
+summary (definitions, statements with hypotheses, proof ideas, examples; one
+request per lesson, all in one batch, stored as `Lesson.digest` and reused by
+later reviews), and the review, its quizzes and its chat work from those.
+Flashcards come back at growing intervals (1, 3, 7, 14, 30 days after "Got it";
+"Again" asks the card again in the same session and resets it).
+
+**Continuing a course** (`GenerationService.continueCourse`, `lib/ui/continue_sheet.dart`):
+"Continue with part N" on a course page plans the next part of its series (any number
+of parts; asked from an earlier part it still continues after the last one). The
+planner gets every lesson of the earlier parts, numbered E1, E2, ... across parts,
+with its key summary (`Lesson.digest`; lessons with notes but no summary get one
+first, a few at a time while the student waits, kept for reviews and later parts;
+else the notes' Summary section; an unwritten lesson gives its brief), plus an
+optional "what should part N cover". Its plan adds `ASSUMES: E3, E7` per lesson,
+stored as `Lesson.buildsOn`. A lesson of a later part is written knowing the earlier
+parts' lesson titles and the summaries of the lessons it builds on
+(`courseContext`, `Prompts._courseBlock`). Parts are separate courses linked by
+`Course.continues`, `seriesId` and `part`; the library shows a series as one box
+(`seriesGroups`), the course page links the neighbouring parts, and playing on
+continues into the next part (`nextPart` in `lib/player/next_lesson.dart`). "Plan it
+with your own AI assistant" gives the same planning prompt to copy, without
+writing summaries (`continuationPrompt`, `/import-course?continues=<id>`).
+
 **Lessons written elsewhere** (`lib/ui/import_lesson_screen.dart`, `lib/ai/lesson_import.dart`):
 for students without an OpenRouter key but with a ChatGPT, Claude or Gemini
 subscription. "Or write it with your own AI assistant" in the create sheet gives
@@ -122,18 +183,50 @@ page (or tapping a planned lesson when there is no key) opens the import screen 
 that lesson, whose prompt carries its brief and its place in the course, and the
 answer fills that lesson (`importLesson(into:)`), keeping its title and order.
 
+**Backup** (`lib/core/backup.dart`, `lib/ui/backup_section.dart`): Settings, "Your
+data". "Export all data" writes one zip (every database record: courses, lessons
+with notes and scripts, chats, quizzes, flashcards, listening positions, settings;
+plus the PDFs of imported books) and opens the share sheet. The recordings are
+optional: without them the file is small and each lecture is recorded again on the
+other phone from its stored script ("Record the lecture", no key needed). "Import a
+backup" merges by id: records in the backup replace the ones with the same id,
+everything else stays. API keys are never in the file. Lessons that were mid-way
+are imported as failed-with-retry, except those waiting for a batch.
+
+**Notifications for a course**: lessons of one course that finish in the same run
+are announced once ("Course ready: N lessons"), when the last of them is done; a
+single lesson is announced as itself. The background check announces an arrived
+batch once per batch ("12 lessons can continue ... not finished yet"), not once
+per lesson. A lesson in the batch queue says what it is waiting for: the notes, the
+lecture script (a second request, after the notes) or the proof review.
+
 Speech is either an on-device sherpa-onnx model, downloaded on first use:
 Kokoro (103 MB, 11 voices, the default), Kitten Nano 0.8 (31 MB, 8 voices) or
 Piper Lessac (67 MB, 1 voice); or an OpenRouter speech model. Lesson text comes
-from OpenRouter. The lesson model is chosen in Settings: `GPT-6.1 Sol (batch)`
-(`openai/gpt-6.1-sol`, the default), `GPT-6.1 Terra (batch)`, `GPT-6 Luna`
-(immediate, the old default), or a custom model slug with its own Batch API
-switch. The reasoning effort can be set for any of them (model default, minimal,
-low, medium, high, extra high, max); each preset starts from its own (high for
-Sol and Terra), and Settings marks Sol (batch) and high as recommended. The API key is kept in secure storage.
+from OpenRouter. The model is picked where it is used (`lib/ui/model_picker.dart`),
+not in Settings: in the create sheet for a lesson or a course, in the review
+sheet, on a lesson that is not written yet (or failed), in the chat and in the
+quiz. The menu always offers `GPT-6.1 Sol (batch)` (`openai/gpt-6.1-sol`, the
+default), `GPT-6.1 Terra (batch)`, `GPT-6 Luna (batch)` and a custom model id;
+lessons and reviews also get `GPT-6 Luna (immediate)` and a Batch API switch for
+the custom model. Chat and quizzes are answered while the student waits, so
+there the same models are asked right away and the batch discount does not
+apply, except for a quiz ordered for later (see Quiz). The reasoning effort can be set next to the model (model default,
+minimal, low, medium, high, extra high, max); high is marked as recommended and
+is the default. The choice made for a lesson is stored on it (`Lesson.model`);
+the last one is remembered as the starting point for the next. The chat model
+also answers exercise hints and solutions and "Explain this again differently".
+Each lesson shows which model wrote it ("Written by GPT-6.1 Sol (batch) · high"
+above the notes, the model name in the library). The API key is kept in secure storage.
 
 Batch presets cost about half as much and answer within 24 h, usually within
-minutes. Course outlines and the tutor chat always run immediately. While the
+minutes. Course outlines and the tutor chat always run immediately. A course (and each later
+part) is planned by its own model, apart from the one that writes its lessons:
+"Plans the course" in the create sheet and "Plans part N" in the continue sheet
+(`PlannerButton`, `AppSettings.plannerModel`, remembered as `plannerChoice`). It
+defaults to GPT-6.1 Sol at high effort whatever writes the lessons, is always asked
+right away, and gets the chosen reasoning effort. The summaries written before a
+later part is planned use the lesson model, asked right away. While the
 app is running it polls a waiting batch (every 15 s, backing off to 3 min) and
 again when it returns to the foreground. With the app closed, a WorkManager task
 checks about every 15 minutes and posts a notification asking the user to open
@@ -202,6 +295,74 @@ Gradle Plugin 9.1.1, which the current Flutter requires. The app compiles agains
 Android SDK 37, which flutter_local_notifications requires. `flutter_foreground_task`
 is the keep-alive service's dependency (see How it works).
 
+## Web version
+
+The app also runs in a desktop browser (Chrome or Edge recommended):
+
+```
+flutter build web --release --no-wasm-dry-run
+python3 tool/serve_web.py            # http://127.0.0.1:8790/
+```
+
+`tool/serve_web.py` is a small static server that adds the cross-origin
+isolation headers, so WebAssembly gets several threads. The page must be a
+secure context (`https://` or `localhost`): WebGPU, the encrypted key storage
+and those threads are not available over plain `http://` to another machine.
+
+What differs in a browser (`filesAreBlobs` in `lib/platform/files.dart`):
+
+- **Storage.** The database is IndexedDB (`sembast_web`). Recorded lectures
+  are WAV blobs in a second IndexedDB database, under the same path strings as
+  on a device (`web/learnmath_web.js`, `lib/platform/files_web.dart`). A
+  lecture is assembled in memory before it is stored.
+- **Voice.** "In this browser" is Kokoro v1.0 through kokoro-js 1.2.1, in a
+  worker (`web/kokoro_worker.js`, `lib/tts/kokoro_web_engine.dart`): on the
+  graphics card with WebGPU (fp32 model, about 330 MB), else on the processor
+  (q8 model, about 90 MB). kokoro-js comes from jsDelivr and the model from
+  Hugging Face, downloaded once and cached by the browser. The OpenRouter
+  voice works as on a device. `AppSettings.browserVoice` picks the speaker.
+- **Hosting.** The app is published at https://gabirodz.github.io/learnmath/
+  from the `learnmath/` folder of the site's repository
+  (`Gabirodz/Gabirodz.github.io`, a Jekyll blog built by GitHub Actions).
+  `tool/build_pages.sh <site checkout>` builds it with that base path and
+  replaces the folder; committing and pushing there deploys it. GitHub Pages
+  cannot send the isolation headers, so without WebGPU the voice runs on one
+  thread. The blog's theme has a caching service worker for the whole
+  domain: `web/learnmath_sw.js` (no fetch handler, scope `/learnmath/`)
+  keeps it from controlling the app, and the blog's `_config.yml` lists
+  `/learnmath` under `pwa.cache.deny_paths`. `web/flutter_bootstrap.js`
+  leaves out Flutter's own, deprecated service worker, which would take the
+  same scope.
+- **Loading.** A first visit downloads about 6 MB (the app's code, 3.3 MB
+  gzipped; the CanvasKit engine, 1.5 MB; fonts). `web/index.html` shows a
+  loading screen until Flutter's `flutter-first-frame` event, and
+  `web/flutter_bootstrap.js` tells it when the code has arrived.
+- **Not in the browser yet:** SymPy checks (the notes keep their checks,
+  unrun), importing a PDF book, the PDF of the notes, backups, notifications
+  and generation while the tab is closed.
+
+## Licence
+
+Copyright (C) 2026 Axel Gabriel Rodriguez Zarate.
+
+LearnMath is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See `LICENSE` for the full text.
+
+The GPL is not only a choice: the voice engine contains eSpeak NG, which is
+under it. `THIRD_PARTY_NOTICES.md` lists that and the other components the app
+is built from or downloads, and the app shows the licences of its packages
+under Settings, About, "Open-source licences" (`lib/core/licenses.dart`).
+
+## Support
+
+LearnMath is free. If it is useful to you, you can
+[buy me a coffee](https://buymeacoffee.com/gabirodz). The same link is in the
+app under Settings, About; nothing in the app depends on it.
+
 ## Status
 
 Built and unit-tested; **not yet run on a device**. Verified on the host:
@@ -230,4 +391,5 @@ for re-explanations, recall questions, reviews, hints, solutions and prerequisit
 - Tap a page citation in chat to jump to that page; whole-book questions.
 - Start listening while the rest of the lecture is still being recorded.
 - Compress audio (WAV is ~3 MB/min).
-- Web build: storage and TTS use `dart:io` and need web implementations.
+- Web: SymPy checks (run the Pyodide runner page in a worker), book import,
+  notes PDF, backups; compress recordings instead of storing WAV blobs.

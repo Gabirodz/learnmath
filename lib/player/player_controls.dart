@@ -18,6 +18,9 @@ abstract interface class PlayerControls {
 
   Future<void> toggle();
 
+  /// Back or forward by the skip interval of the settings.
+  Future<void> skipBy({required bool forward});
+
   /// Stops playback and unloads the lesson.
   Future<void> stop();
 }

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- audio_service looks up its notification button icons by name at run
+     time, so the release build's resource shrinking would remove them and
+     every playback state update would fail ("You must specify an icon
+     resource id to build a CustomAction"): no media notification, no
+     lock-screen or Bluetooth controls. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/audio_service_*" />

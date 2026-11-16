@@ -102,6 +102,14 @@ class TableBlock extends Block {
   final List<List<List<Inline>>> rows;
 }
 
+/// [tex] as the formula renderer can take it. A lone backslash at the end
+/// of a line is a control space in LaTeX (`N\` then a line break means
+/// `N\ `), but flutter_math rejects the whole formula over it ("Undefined
+/// control sequence"), so it is made an explicit `\ `. A `\\` line break
+/// is left alone.
+String normalizeTex(String tex) => tex.replaceAllMapped(
+    RegExp(r'(?<!\\)((?:\\\\)*)\\[ \t]*\r?\n'), (m) => '${m[1]}\\ ');
+
 /// Parses [markdown] into blocks.
 List<Block> parseMarkdownBlocks(String markdown) {
   final lines = markdown.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');

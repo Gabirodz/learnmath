@@ -1,22 +1,18 @@
-import 'dart:io';
 import 'dart:typed_data';
 
+import '../platform/files.dart';
+
 /// Incrementally writes a 16-bit mono PCM WAV file so a long lecture never has
-/// to be held in memory.
+/// to be held in memory (in a browser it is, until it is stored as a blob).
 class WavWriter {
   WavWriter._(this._file, this.sampleRate);
 
-  final RandomAccessFile _file;
+  final ByteSink _file;
   final int sampleRate;
   int _samples = 0;
 
-  static Future<WavWriter> open(String path, int sampleRate) async {
-    final f = File(path);
-    await f.parent.create(recursive: true);
-    final raf = await f.open(mode: FileMode.write);
-    await raf.writeFrom(Uint8List(44)); // header placeholder
-    return WavWriter._(raf, sampleRate);
-  }
+  static Future<WavWriter> open(String path, int sampleRate) async =>
+      WavWriter._(await openByteSink(path, headerLength: 44), sampleRate);
 
   int get samplesWritten => _samples;
 
@@ -25,8 +21,8 @@ class WavWriter {
 
   Future<void> writeSamples(Int16List pcm) async {
     if (pcm.isEmpty) return;
-    await _file.writeFrom(
-        pcm.buffer.asUint8List(pcm.offsetInBytes, pcm.lengthInBytes));
+    await _file
+        .add(pcm.buffer.asUint8List(pcm.offsetInBytes, pcm.lengthInBytes));
     _samples += pcm.length;
   }
 
@@ -57,10 +53,11 @@ class WavWriter {
     h.setUint16(34, 16, Endian.little); // bits per sample
     tag(36, 'data');
     h.setUint32(40, dataBytes, Endian.little);
-    await _file.setPosition(0);
-    await _file.writeFrom(h.buffer.asUint8List());
-    await _file.close();
+    await _file.finish(h.buffer.asUint8List());
   }
+
+  /// Closes the file unfinished, after a failure.
+  Future<void> abandon() => _file.abandon();
 }
 
 Int16List floatToPcm16(Float32List samples) {

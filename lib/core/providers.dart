@@ -1,12 +1,16 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sembast/sembast.dart';
 
 import '../checks/math_check.dart';
 import '../checks/pyodide_runner.dart';
 import '../notify/notifications.dart';
+import '../platform/links.dart';
 import '../pipeline/generation_service.dart';
+import '../player/lecture_audio_handler.dart';
+import '../quiz/quiz_store.dart';
 import '../player/lecture_player.dart';
 import '../tts/on_device_tts.dart';
 import 'models.dart';
@@ -54,6 +58,10 @@ class SettingsNotifier extends Notifier<AppSettings> {
 final settingsProvider =
     NotifierProvider<SettingsNotifier, AppSettings>(SettingsNotifier.new);
 
+/// Opens a web page in the browser (replaced in tests).
+final linkOpenerProvider =
+    Provider<Future<void> Function(Uri url)>((ref) => openInBrowser);
+
 final voiceModelsProvider = Provider<VoiceModelManager>(
     (ref) => VoiceModelManager(ref.watch(appPathsProvider).modelsDir));
 
@@ -69,7 +77,7 @@ final keepAliveProvider =
 
 /// SymPy runs in a hidden WebView, which only the mobile platforms have.
 final checkRunnerFactoryProvider = Provider<MathCheckRunner Function()?>(
-    (ref) => Platform.isAndroid || Platform.isIOS
+    (ref) => !kIsWeb && (Platform.isAndroid || Platform.isIOS)
         ? PyodideCheckRunner.new
         : null);
 
@@ -104,6 +112,7 @@ final generationProvider = Provider<GenerationService>((ref) {
     batchBackground: ref.watch(batchBackgroundProvider),
     keepAlive: ref.watch(keepAliveProvider),
     createCheckRunner: ref.watch(checkRunnerFactoryProvider),
+    quizzes: QuizStore(ref.watch(databaseProvider)),
   );
 });
 
@@ -124,11 +133,17 @@ final lessonProvider = StreamProvider.family<Lesson?, String>(
     (ref, id) => ref.watch(repositoryProvider).watchLesson(id));
 
 /// One player for the whole app so audio keeps going across screens.
+/// The media session (notification and lock-screen controls), started in
+/// `main` before the app runs. Null in tests.
+final mediaHandlerProvider = Provider<LectureAudioHandler?>((ref) => null);
+
 final lecturePlayerProvider = Provider<LecturePlayer>((ref) {
   final player = LecturePlayer(
     ref.watch(repositoryProvider),
     autoPlayNext: () => ref.read(settingsProvider).autoPlayNext,
     speed: () => ref.read(settingsProvider).playbackSpeed,
+    skipSeconds: () => ref.read(settingsProvider).skipSeconds,
+    media: ref.watch(mediaHandlerProvider),
   );
   ref.onDispose(player.dispose);
   return player;

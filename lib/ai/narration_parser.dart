@@ -212,20 +212,23 @@ List<NarrationSegment> _fallbackSentences(String raw) {
 /// Parses the COURSE/DESCRIPTION/LESSON/BRIEF outline.
 /// Throws [FormatException] if no lessons are found.
 CourseOutline parseOutline(String raw) {
-  const keys = {'COURSE', 'TITLE', 'DESCRIPTION', 'LESSON', 'BRIEF'};
+  const keys = {'COURSE', 'TITLE', 'DESCRIPTION', 'LESSON', 'BRIEF', 'ASSUMES'};
   String title = '';
   String description = '';
-  final lessons = <({String title, String brief})>[];
+  final lessons = <({String title, String brief, List<int> assumes})>[];
   String? lessonTitle;
   var brief = '';
+  var assumes = <int>[];
   String? last; // 'course' | 'desc' | 'lesson' | 'brief'
 
   void flush() {
     if (lessonTitle != null && lessonTitle!.trim().isNotEmpty) {
-      lessons.add((title: lessonTitle!.trim(), brief: brief.trim()));
+      lessons.add(
+          (title: lessonTitle!.trim(), brief: brief.trim(), assumes: assumes));
     }
     lessonTitle = null;
     brief = '';
+    assumes = <int>[];
   }
 
   for (var line in raw.split(RegExp(r'\r?\n'))) {
@@ -271,6 +274,12 @@ CourseOutline parseOutline(String raw) {
       case 'BRIEF':
         brief = value;
         last = 'brief';
+      case 'ASSUMES':
+        // "E3, E7", "3 and 7" or "none": the numbers of earlier lessons.
+        assumes = [
+          for (final m in RegExp(r'\d+').allMatches(value)) int.parse(m[0]!)
+        ];
+        last = null;
     }
   }
   flush();
@@ -282,7 +291,8 @@ CourseOutline parseOutline(String raw) {
     title: title.isEmpty ? lessons.first.title : title,
     description: description,
     lessons: [
-      for (final l in lessons) OutlineLesson(title: l.title, brief: l.brief),
+      for (final l in lessons)
+        OutlineLesson(title: l.title, brief: l.brief, assumes: l.assumes),
     ],
   );
 }

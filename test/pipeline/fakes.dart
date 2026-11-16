@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:learnmath/quiz/quiz_store.dart';
 import 'package:learnmath/ai/openrouter_client.dart';
 import 'package:learnmath/checks/math_check.dart';
 import 'package:learnmath/core/models.dart';
@@ -60,6 +61,10 @@ class FakeOpenRouter {
   /// through to the kind-based answers. Lets a test script the reviewer and
   /// the lesson model separately.
   final modelAnswers = <String, String? Function(Map<String, Object?> body)>{};
+
+  /// Tried first for every request, streamed or batched (requests inside a
+  /// batch carry no model of their own); return null to fall through.
+  String? Function(Map<String, Object?> body)? extraAnswer;
 
   /// Every request that carried a model, in order, whether it was streamed
   /// ('chat') or sent inside a batch ('batch').
@@ -220,7 +225,8 @@ class FakeOpenRouter {
   }
 
   String answerFor(Map<String, Object?> body) {
-    final byModel = modelAnswers[body['model']]?.call(body);
+    final byModel =
+        extraAnswer?.call(body) ?? modelAnswers[body['model']]?.call(body);
     return byModel ?? _answerByKind(body);
   }
 
@@ -360,6 +366,11 @@ class FakeEngine implements TtsEngine {
 class RecordingNotifications extends NoNotifications {
   final ready = <({String id, String title, bool hasAudio})>[];
   final failed = <({String id, String title, String reason})>[];
+  final courses = <({String id, String title, int lessons})>[];
+
+  @override
+  Future<void> courseReady(String courseId, String title, int lessons) async =>
+      courses.add((id: courseId, title: title, lessons: lessons));
 
   @override
   Future<void> lessonReady(String lessonId, String title,
@@ -370,6 +381,19 @@ class RecordingNotifications extends NoNotifications {
   Future<void> lessonFailed(
           String lessonId, String title, String reason) async =>
       failed.add((id: lessonId, title: title, reason: reason));
+
+  /// Quiz notifications: questions for "ready", reason for "failed".
+  final quizzes = <({String lessonId, int? questions, String? reason})>[];
+
+  @override
+  Future<void> quizReady(
+          String lessonId, String lessonTitle, int questions) async =>
+      quizzes.add((lessonId: lessonId, questions: questions, reason: null));
+
+  @override
+  Future<void> quizFailed(
+          String lessonId, String lessonTitle, String reason) async =>
+      quizzes.add((lessonId: lessonId, questions: null, reason: reason));
 }
 
 class RecordingBackground implements BatchBackground {
@@ -393,6 +417,9 @@ class Env {
   AppSettings settings = const AppSettings(apiKey: 'k');
   late GenerationService service;
 
+  /// Makes the speech engine of each recording.
+  TtsEngine Function() engine = FakeEngine.new;
+
   static var _dbN = 0;
 
   Future<void> init({FakeRunner? runner, bool withRunner = true}) async {
@@ -412,8 +439,9 @@ class Env {
       keepAlive: keepAlive,
       createCheckRunner: withRunner && runner != null ? () => runner : null,
       createClient: (k) => OpenRouterClient(apiKey: k, httpClient: fake.client),
-      createEngine: (_) => FakeEngine(),
+      createEngine: (_) => engine(),
       autoPoll: false,
+      quizzes: QuizStore(db),
     );
   }
 

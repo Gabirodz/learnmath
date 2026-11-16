@@ -56,4 +56,80 @@ void main() {
     final t = tester.getRect(find.textContaining('Compactness'));
     expect(t.width <= 720, isTrue);
   });
+
+  group('colour-coded environments', () {
+    List<(NoteKind?, int)> shape(String md) => [
+          for (final g in groupNoteBlocks(splitSourceBlocks(md)))
+            (g.kind, g.blocks.length)
+        ];
+
+    test('a definition keeps its formula and the sentence that goes on', () {
+      const md = '**Definition.** A sequence is Cauchy if:\n\n'
+          '\$\$\n|a_m - a_n| < \\varepsilon\n\$\$\n\n'
+          'for all large \$m, n\$.\n\n'
+          'A metric space is complete if every Cauchy sequence converges.';
+      // The labelled paragraph and its formula are already one block.
+      expect(shape(md), [(NoteKind.definition, 2), (null, 1)]);
+    });
+
+    test('a proof runs to its end mark, then prose follows', () {
+      const md = '**Theorem 2 (Heine-Borel).** Closed and bounded is compact.'
+          '\n\n**Proof.** Take a cover.\n\nRefine it.\n\n'
+          'So it is finite. \$\\blacksquare\$\n\nNext we look at examples.';
+      expect(shape(md), [
+        (NoteKind.theorem, 1),
+        (NoteKind.proof, 3),
+        (null, 1),
+      ]);
+    });
+
+    test('an example runs to the next heading; a heading ends anything', () {
+      const md = '**Example.** Take \$x = 1\$.\n\nThen \$x^2 = 1\$.\n\n'
+          '## Summary\n\n**Proof sketch.** Without an end mark.\n\n'
+          'Still the proof.\n\n## Exercises';
+      expect(shape(md), [
+        (NoteKind.example, 2),
+        (null, 1),
+        (NoteKind.proof, 2),
+        (null, 1),
+      ]);
+    });
+
+    test('labels are recognised in their usual forms', () {
+      expect(noteKindOf('**Lemma 3.1.** Text'), NoteKind.theorem);
+      expect(noteKindOf('**Corollary.** Text'), NoteKind.theorem);
+      expect(noteKindOf('__Proposition.__ Text'), NoteKind.theorem);
+      expect(noteKindOf('**Non-example.** Text'), NoteKind.example);
+      expect(noteKindOf('**Counterexample.** Text'), NoteKind.example);
+      expect(noteKindOf('**Remark (intuition).** Text'), NoteKind.remark);
+      expect(noteKindOf('**Notation.** Text'), NoteKind.definition);
+      expect(noteKindOf('**Theorems** are useful.'), isNull);
+      expect(noteKindOf('The theorem says.'), isNull);
+      expect(noteKindOf('**Important.** Text'), isNull);
+    });
+
+    test('a statement ending in a colon keeps its list', () {
+      const md = '**Theorem.** The following are equivalent:\n\n'
+          '1. \$K\$ is compact.\n2. \$K\$ is closed and bounded.\n\n'
+          'We prove it in two steps.';
+      expect(shape(md), [(NoteKind.theorem, 2), (null, 1)]);
+    });
+
+    testWidgets('the notes show each environment in its box', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: NotesView(
+            markdown: '# T\n\n**Definition.** A thing.\n\n**Theorem.** A '
+                'fact.\n\n**Proof.** Easy. \$\\blacksquare\$\n\nProse.',
+            onAskAbout: (_) {},
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(
+          tester.widgetList<NoteBox>(find.byType(NoteBox)).map((b) => b.kind),
+          [NoteKind.definition, NoteKind.theorem, NoteKind.proof]);
+    });
+  });
 }

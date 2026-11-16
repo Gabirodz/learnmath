@@ -49,7 +49,8 @@ List<ChatMessage> buildChatMessages({
   required Lesson lesson,
   required List<ChatTurn> history,
 }) {
-  final notes = lesson.notesMarkdown ?? '(This lesson has no notes yet.)';
+  // For a review, the summaries of the lessons it covers come with it.
+  final notes = lesson.studyText ?? '(This lesson has no notes yet.)';
   final system = '$_tutorInstructions\n\nLesson title: ${lesson.title}\n\n'
       '$_notesBegin\n$notes\n$_notesEnd';
   var recent = history.length > kMaxChatTurns

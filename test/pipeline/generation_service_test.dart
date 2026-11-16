@@ -464,7 +464,7 @@ void main() {
       expect(env.fake.chatBodies, isEmpty, reason: 'nothing was streamed');
       expect(env.notifications.failed, isEmpty);
       expect(env.notifications.ready, isEmpty);
-      expect(env.lastLabel(id), 'Waiting for the batch answer…');
+      expect(env.lastLabel(id), startsWith('Waiting for the '));
 
       expect(env.background.updates, isNotEmpty);
       final w = env.background.updates.last.single;
@@ -563,7 +563,7 @@ void main() {
       expect(env.fake.deleted, ['batch_1'],
           reason: 'the collected batch is deleted on OpenRouter');
       expect(env.notifications.ready, isEmpty);
-      expect(env.lastLabel(id), 'Waiting for the batch answer…');
+      expect(env.lastLabel(id), startsWith('Waiting for the '));
       expect(env.background.updates.last.single.batchId, 'batch_2');
 
       final scriptBody = env.fake.batchBodies.last;
@@ -603,7 +603,7 @@ void main() {
       expect(l.error, isNull);
       expect(env.fake.submitted, hasLength(1), reason: 'no second batch');
       expect(env.notifications.failed, isEmpty);
-      expect(env.lastLabel(id), 'Waiting for the batch answer…');
+      expect(env.lastLabel(id), startsWith('Waiting for the '));
       expect(env.fake.deleted, isEmpty);
     });
 
@@ -890,7 +890,7 @@ void main() {
       expect(w.stage, LessonStage.generatingNotes);
       expect(w.batch!.id, 'batch_x');
       expect(w.error, isNull);
-      expect(env.lastLabel('wait'), 'Waiting for the batch answer…');
+      expect(env.lastLabel('wait'), startsWith('Waiting for the '));
       expect((await env.lesson('ready')).stage, LessonStage.ready);
       expect((await env.lesson('pending')).stage, LessonStage.pending);
       expect(env.background.updates.last.single.batchId, 'batch_x');
