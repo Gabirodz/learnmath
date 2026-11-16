@@ -158,11 +158,11 @@ void main() {
     await env.settle();
     expect((await env.lesson(id)).voice, 'Kokoro · Emma (UK, female)');
 
-    env.settings = const AppSettings(voiceModel: 'piper-lessac');
+    env.settings = const AppSettings(voiceModel: 'piper-ljspeech');
     await env.service.rerecord(id);
     await env.settle();
     final l = await env.lesson(id);
-    expect(l.voice, 'Piper Lessac · Lessac (US, female)');
+    expect(l.voice, 'Piper LJSpeech · LJ (US, female)');
     expect(Lesson.fromJson(l.toJson()).voice, l.voice);
 
     env.settings = const AppSettings(

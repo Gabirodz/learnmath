@@ -161,7 +161,7 @@ class LessonTile extends ConsumerWidget {
       final ms = lesson.audioDurationMs;
       final mins = ms == null ? null : (ms / 60000).ceil();
       subtitle = mins == null ? 'Ready to read and ask' : '$mins min';
-      // The voice model of the recording ("Piper Lessac").
+      // The voice model of the recording ("Piper LJSpeech").
       final voice = lesson.voice?.split(' · ').first;
       if (mins != null && voice != null) subtitle = '$subtitle · $voice';
       // The model that wrote it ("GPT-6.1 Sol (batch)"), without the effort.

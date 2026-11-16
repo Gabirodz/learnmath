@@ -63,7 +63,7 @@ void main() {
       segments: const [NarrationSegment(say: 'Hello.', startMs: 0, endMs: 900)],
       audioPath: audio.path,
       audioDurationMs: 900,
-      voice: 'Piper Lessac',
+      voice: 'Piper LJSpeech',
       pdfPath: '${old.paths.docs}/lessons/l1/notes.pdf',
       lastPositionMs: 300,
     ));
@@ -162,7 +162,7 @@ void main() {
     expect(l1.audioPath, fresh.paths.lessonAudio('l1'));
     expect(await File(l1.audioPath!).length(), 2000);
     expect(l1.hasAudio, isTrue);
-    expect(l1.voice, 'Piper Lessac');
+    expect(l1.voice, 'Piper LJSpeech');
     expect(l1.lastPositionMs, 300);
     expect(await fresh.repo.positionCheckpoint('l1'), 450);
   });

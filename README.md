@@ -132,8 +132,6 @@ code layout.
 LearnMath works on Android and in desktop browsers, and is in active
 development. Things still to do:
 
-- Replace the Piper "Lessac" voice, whose training recordings are licensed for
-  research only, with a voice trained on public-domain recordings.
 - Bring the SymPy checks, book import, notes PDF and backups to the browser
   version.
 - Compress recordings (lectures are stored as WAV, about 3 MB a minute).

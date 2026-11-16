@@ -1,6 +1,6 @@
 // Integration test for on-device speech. Needs an extracted voice model:
 //   KOKORO_MODELS_DIR=<dir containing the model's folder, e.g.
-//     kokoro-int8-en-v0_19/> VOICE_MODEL=<kokoro|kitten-nano|piper-lessac> \
+//     kokoro-int8-en-v0_19/> VOICE_MODEL=<kokoro|kitten-nano|piper-ljspeech> \
 //   LD_LIBRARY_PATH=~/.pub-cache/hosted/pub.dev/sherpa_onnx_linux-<ver>/linux/x64 \
 //   flutter test test/tts
 @TestOn('vm')

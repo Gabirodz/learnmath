@@ -218,7 +218,7 @@ class Lesson {
   final int? audioDurationMs;
 
   /// The voice the lecture was recorded with, as shown to the student
-  /// ("Piper Lessac · Lessac (US, female)"). Null for recordings made before
+  /// ("Piper LJSpeech · LJ (US, female)"). Null for recordings made before
   /// this was kept.
   final String? voice;
 

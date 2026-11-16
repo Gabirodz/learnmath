@@ -137,7 +137,7 @@ void main() {
         customEffort: 'xhigh',
         mathChecks: false,
         ttsBackend: TtsBackend.openRouter,
-        voiceModel: 'piper-lessac',
+        voiceModel: 'piper-ljspeech',
         voiceSpeaker: 3,
         openRouterTtsModel: 'a/b',
         openRouterTtsVoice: 'v',
@@ -155,7 +155,7 @@ void main() {
       expect(back.customEffort, 'xhigh');
       expect(back.mathChecks, isFalse);
       expect(back.ttsBackend, TtsBackend.openRouter);
-      expect(back.voiceModel, 'piper-lessac');
+      expect(back.voiceModel, 'piper-ljspeech');
       expect(back.voiceSpeaker, 3);
       expect(back.openRouterTtsModel, 'a/b');
       expect(back.openRouterTtsVoice, 'v');

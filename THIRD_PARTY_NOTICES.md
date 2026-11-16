@@ -28,14 +28,16 @@ on the user's device.
 | kokoro-js 1.2.1 | Apache-2.0 | The voice in the browser version, from the jsDelivr CDN. Its bundle includes the `phonemizer` package (Apache-2.0), which embeds eSpeak NG (GPL-3.0-or-later). https://github.com/hexgrad/kokoro |
 | Kokoro-82M voice model | Apache-2.0 | Voice model, from Hugging Face (browser) or the sherpa-onnx model releases (Android). https://huggingface.co/hexgrad/Kokoro-82M |
 | Kitten TTS Nano 0.8 voice model | See its model page | Optional voice model (Android). https://huggingface.co/KittenML/kitten-tts-nano-0.8 |
-| Piper voice `en_US-lessac-medium` | See note below | Optional voice model (Android). |
+| Piper voice `en_US-ljspeech-medium` | Trained on the LJ Speech dataset (public domain) | Optional voice model (Android), from the sherpa-onnx model releases. https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/ljspeech/medium |
 | Pyodide and SymPy | MPL-2.0 (Pyodide), BSD (SymPy) | Re-running the computations of a lesson (Android), from the jsDelivr CDN. https://github.com/pyodide/pyodide |
 | CanvasKit | BSD | Flutter's drawing engine in the browser version, from Google's CDN. |
 
-**Piper `en_US-lessac-medium`.** This voice was trained on the Lessac
-Blizzard 2013 corpus, whose licence limits use to research on speech
-technology. It is to be replaced by a voice trained on public-domain
-recordings (for example `en_US-ljspeech` or `en_US-kristin`).
+**Piper `en_US-ljspeech-medium`.** Trained from scratch (not fine-tuned from
+another voice) on the LJ Speech dataset: LibriVox recordings of one reader,
+texts and audio both in the public domain.
+https://keithito.com/LJ-Speech-Dataset/ It replaces `en_US-lessac-medium`, whose training recordings are licensed for
+research only; the app deletes that voice's files if an earlier version
+downloaded them.
 
 ## Services
 

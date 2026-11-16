@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -62,8 +63,11 @@ final settingsProvider =
 final linkOpenerProvider =
     Provider<Future<void> Function(Uri url)>((ref) => openInBrowser);
 
-final voiceModelsProvider = Provider<VoiceModelManager>(
-    (ref) => VoiceModelManager(ref.watch(appPathsProvider).modelsDir));
+final voiceModelsProvider = Provider<VoiceModelManager>((ref) {
+  final voices = VoiceModelManager(ref.watch(appPathsProvider).modelsDir);
+  if (!kIsWeb) unawaited(voices.removeRetired());
+  return voices;
+});
 
 /// Overridden in `main()` with the plugin-backed implementations.
 final notificationsProvider =

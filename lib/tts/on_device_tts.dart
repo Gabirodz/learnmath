@@ -51,16 +51,23 @@ class VoiceModel {
       'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$archive.tar.bz2';
 
   static VoiceModel byId(String id) {
+    id = _renamed[id] ?? id;
     for (final m in voiceModels) {
       if (m.id == id) return m;
     }
     return voiceModels.first;
   }
+
+  /// Ids of removed models, mapped to the model that replaced them.
+  static const _renamed = {'piper-lessac': 'piper-ljspeech'};
 }
 
 /// On-device voices, most natural first. Speeds were measured with
 /// sherpa-onnx 1.13.8 on a 4-core x86 machine using two threads (time to
 /// synthesize / length of the audio): Kokoro 2.2, Kitten 0.48, Piper 0.11.
+/// Every voice here must allow use in free and commercial software, so no
+/// Piper voice trained on (or fine-tuned from) the research-only Lessac
+/// recordings.
 const voiceModels = <VoiceModel>[
   VoiceModel(
     id: 'kokoro',
@@ -104,14 +111,14 @@ const voiceModels = <VoiceModel>[
     ],
   ),
   VoiceModel(
-    id: 'piper-lessac',
-    label: 'Piper Lessac',
-    archive: 'vits-piper-en_US-lessac-medium',
+    id: 'piper-ljspeech',
+    label: 'Piper LJSpeech',
+    archive: 'vits-piper-en_US-ljspeech-medium',
     family: VoiceFamily.vits,
-    modelFile: 'en_US-lessac-medium.onnx',
+    modelFile: 'en_US-ljspeech-medium.onnx',
     downloadMb: 67,
     speed: 'About 20× faster than Kokoro',
-    speakers: ['Lessac (US, female)'],
+    speakers: ['LJ (US, female)'],
   ),
 ];
 
@@ -129,6 +136,22 @@ class VoiceModelManager {
   Future<void> delete(VoiceModel m) async {
     final d = Directory(_dir(m));
     if (await d.exists()) await d.delete(recursive: true);
+  }
+
+  /// Folders of models the app no longer offers: Piper Lessac, whose
+  /// recordings are licensed for research only.
+  static const _retired = ['vits-piper-en_US-lessac-medium'];
+
+  /// Deletes the files of retired models, which settings no longer lists.
+  Future<void> removeRetired() async {
+    for (final name in _retired) {
+      final d = Directory(p.join(modelsDir, name));
+      try {
+        if (await d.exists()) await d.delete(recursive: true);
+      } on FileSystemException {
+        // Tried again on the next start.
+      }
+    }
   }
 
   final _installing = <String, Future<void>>{};

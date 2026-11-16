@@ -200,7 +200,7 @@ lecture script (a second request, after the notes) or the proof review.
 
 Speech is either an on-device sherpa-onnx model, downloaded on first use:
 Kokoro (103 MB, 11 voices, the default), Kitten Nano 0.8 (31 MB, 8 voices) or
-Piper Lessac (67 MB, 1 voice); or an OpenRouter speech model. Lesson text comes
+Piper LJSpeech (67 MB, 1 voice); or an OpenRouter speech model. Lesson text comes
 from OpenRouter. The model is picked where it is used (`lib/ui/model_picker.dart`),
 not in Settings: in the create sheet for a lesson or a course, in the review
 sheet, on a lesson that is not written yet (or failed), in the chat and in the
@@ -324,7 +324,7 @@ flutter build apk --debug
 ```
 
 The TTS host test is skipped unless `KOKORO_MODELS_DIR` is set; it takes
-`VOICE_MODEL=kokoro|kitten-nano|piper-lessac` (see the header of
+`VOICE_MODEL=kokoro|kitten-nano|piper-ljspeech` (see the header of
 `test/tts/kokoro_host_test.dart`). The live batch test,
 `test/live/live_batch_test.dart`, runs only when `OPENROUTER_API_KEY` is set.
 `lib/checks/process_runner.dart` runs the SymPy checks with a local `python3`
